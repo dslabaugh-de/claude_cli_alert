@@ -295,62 +295,81 @@ function readBuddyCard() {
 }
 
 async function handleBuddyImport(req, res) {
+  console.log("[import] received request");
+  let raw, body;
   try {
-    const raw = await readBody(req, 64 * 1024);
-    const body = JSON.parse(raw);
-    const content = body && body.content;
-    if (!content || typeof content !== "string" || !content.trim()) {
-      return sendJSON(res, 400, { error: "missing or empty content" });
-    }
-    const clean = sanitizeBuddyText(content);
-
-    // Try a series of dirs in priority order so the save ALWAYS lands
-    // somewhere the server will read back. The first writable one wins.
-    const candidates = [
-      BUDDY_DIR,
-      path.join(os.homedir(), ".claude-alert", "buddy"),
-      path.join(os.homedir(), ".claude-alert-buddy"),
-    ];
-
-    let lastErr = null;
-    let writtenTo = null;
-    const filename = "imported.txt";
-    for (const dir of candidates) {
-      try {
-        fs.mkdirSync(dir, { recursive: true });
-        const filepath = path.join(dir, filename);
-        fs.writeFileSync(filepath, clean, "utf8");
-        writtenTo = filepath;
-        break;
-      } catch (err) {
-        lastErr = err;
-        console.log("[import] candidate failed:", dir, "-", err.code || "?", err.message);
-      }
-    }
-
-    if (!writtenTo) {
-      return sendJSON(res, 500, {
-        error: `all candidate dirs failed. last: ${lastErr ? lastErr.code + " " + lastErr.message : "unknown"}`,
-        tried: candidates,
-      });
-    }
-
-    // If we wrote outside the canonical BUDDY_DIR, also copy there so
-    // readBuddyCard picks it up. This handles the case where server.js is
-    // running out of a clone and BUDDY_DIR differs from where we saved.
-    if (writtenTo !== path.join(BUDDY_DIR, filename)) {
-      try {
-        fs.mkdirSync(BUDDY_DIR, { recursive: true });
-        fs.writeFileSync(path.join(BUDDY_DIR, filename), clean, "utf8");
-      } catch {}
-    }
-
-    console.log("[import] wrote", writtenTo, `(${clean.length} chars)`);
-    return sendJSON(res, 200, { ok: true, path: writtenTo });
+    raw = await readBody(req, 64 * 1024);
   } catch (err) {
-    console.log("[import] exception:", err.message);
-    return sendJSON(res, 400, { error: "import failed: " + err.message });
+    console.log("[import] body read failed:", err.message);
+    return sendJSON(res, 400, { error: "read body failed: " + err.message });
   }
+  try {
+    body = JSON.parse(raw);
+  } catch (err) {
+    console.log("[import] JSON parse failed:", err.message);
+    return sendJSON(res, 400, { error: "JSON parse failed: " + err.message });
+  }
+  const content = body && body.content;
+  if (!content || typeof content !== "string" || !content.trim()) {
+    console.log("[import] empty content");
+    return sendJSON(res, 400, { error: "missing or empty content" });
+  }
+  const clean = sanitizeBuddyText(content);
+
+  // Try candidate dirs in order. Record every attempt so we can show
+  // the user exactly what happened if they all fail.
+  const candidates = [
+    BUDDY_DIR,
+    path.join(os.homedir(), ".claude-alert", "buddy"),
+    path.join(os.homedir(), ".claude-alert-buddy"),
+  ];
+  const attempts = [];
+  let writtenTo = null;
+  const filename = "imported.txt";
+
+  for (const dir of candidates) {
+    const attempt = { dir, step: null, error: null };
+    try {
+      attempt.step = "mkdir";
+      fs.mkdirSync(dir, { recursive: true });
+      attempt.step = "write";
+      const filepath = path.join(dir, filename);
+      fs.writeFileSync(filepath, clean, "utf8");
+      attempt.step = "ok";
+      attempts.push(attempt);
+      writtenTo = filepath;
+      console.log("[import] wrote", filepath, `(${clean.length} chars)`);
+      break;
+    } catch (err) {
+      attempt.error = (err.code || "?") + ": " + err.message;
+      attempts.push(attempt);
+      console.log("[import] candidate failed at", attempt.step, "->", dir, ":", attempt.error);
+    }
+  }
+
+  if (!writtenTo) {
+    const summary = attempts
+      .map((a) => `${a.dir} [${a.step}] ${a.error}`)
+      .join(" | ");
+    return sendJSON(res, 500, {
+      error: "all candidate dirs failed: " + summary,
+      attempts,
+    });
+  }
+
+  // Mirror into BUDDY_DIR if we landed elsewhere so readBuddyCard
+  // (which only looks in BUDDY_DIR) can see the new file.
+  if (writtenTo !== path.join(BUDDY_DIR, filename)) {
+    try {
+      fs.mkdirSync(BUDDY_DIR, { recursive: true });
+      fs.writeFileSync(path.join(BUDDY_DIR, filename), clean, "utf8");
+      console.log("[import] mirrored to", path.join(BUDDY_DIR, filename));
+    } catch (err) {
+      console.log("[import] mirror failed:", err.code, err.message);
+    }
+  }
+
+  return sendJSON(res, 200, { ok: true, path: writtenTo });
 }
 
 // ---------------------------------------------------------------------------
