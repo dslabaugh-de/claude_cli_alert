@@ -674,7 +674,6 @@ After writing the file, describe the character you made in one sentence.</pre>
     locally hosted <span id="host-ip">127.0.0.1:3737</span>
     &nbsp;|&nbsp;
     <button class="test-btn" id="sound-btn">choose alert sound</button>
-    <button class="test-btn" id="test-btn">test</button>
   </footer>
 
   <div class="sound-popover" id="sound-popover" hidden>
@@ -1017,10 +1016,6 @@ After writing the file, describe the character you made in one sentence.</pre>
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
   }
-
-  document.getElementById("test-btn").addEventListener("click", async () => {
-    await fetch("/test-alert", { method: "POST" });
-  });
 
   // ----- boot -----
   (async () => {
