@@ -535,6 +535,28 @@
     color: var(--gray);
   }
 
+  /* Codex source badge */
+  .source-badge {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--gray);
+    background: var(--gray-soft);
+    border: 1px solid var(--gray-border);
+    border-radius: 3px;
+    padding: 1px 4px;
+    flex-shrink: 0;
+  }
+  .tile[data-source="codex"] .tile-face.front {
+    border-left: 3px solid #10a37f;
+  }
+  .tile[data-source="codex"] .source-badge {
+    color: #10a37f;
+    background: #edfaf5;
+    border-color: #10a37f40;
+  }
+
   /* Running = light teal accent */
   .tile.running .tile-face.front {
     background: var(--teal-bg);
@@ -1158,14 +1180,16 @@
       const title = escapeHtml(titleText);
       const url = s.url ? escapeHtml(s.url) : "";
       const tabId = escapeHtml(s.tabId);
+      const source = escapeHtml(s.source || "cli");
       const flippedClass = flipped.has(s.tabId) ? "flipped" : "";
       const startedRel = s.ts ? relTime(s.ts) : "";
       const startedAbs = s.ts ? new Date(s.ts).toLocaleString() : "";
       const userMsg = stats && stats.lastUserMessage ? escapeHtml(stats.lastUserMessage) : "";
       const aiMsg = stats && stats.lastAssistantMessage ? escapeHtml(stats.lastAssistantMessage) : "";
+      const sourceBadge = source === "codex" ? `<span class="source-badge">Codex</span>` : "";
 
       return `
-        <div class="tile ${stateClass} ${flippedClass}" data-tab-id="${tabId}">
+        <div class="tile ${stateClass} ${flippedClass}" data-tab-id="${tabId}" data-source="${source}">
           <div class="tile-inner">
             <div class="tile-face front">
               <div class="tile-top">
@@ -1176,12 +1200,12 @@
                 </div>
               </div>
               <div class="title-row">
-                <span class="title" data-id="${tabId}" title="Click to rename (or use /rename in Claude Code)">${title}</span>
+                ${sourceBadge}<span class="title" data-id="${tabId}" title="${source === "codex" ? "Codex session" : "Click to rename (or use /rename in Claude Code)"}">${title}</span>
               </div>
               <div class="detail">${detail || "&nbsp;"}</div>
               <div class="url" title="${url}">${url}</div>
               <div class="started" title="${escapeHtml(startedAbs)}">started ${escapeHtml(startedRel)}</div>
-              ${renderStats(s.tabId)}
+              ${source !== "codex" ? renderStats(s.tabId) : ""}
             </div>
             <div class="tile-face back">
               <div class="tile-top">

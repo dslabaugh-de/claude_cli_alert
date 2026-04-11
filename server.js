@@ -94,6 +94,13 @@ const CLAUDE_SESSIONS_DIR = path.join(CLAUDE_HOME, "sessions");
 const CLAUDE_PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
 const CLAUDE_HISTORY_FILE = path.join(CLAUDE_HOME, "history.jsonl");
 
+// Codex writes JSONL session files here: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+const CODEX_HOME = path.join(os.homedir(), ".codex");
+const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, "sessions");
+
+// Per-file tracking for the Codex watcher: filename → { tabId, bytesRead, state, cwd, title, ts }
+const codexFileState = new Map();
+
 // Context window sizes by model family
 const CONTEXT_WINDOWS = {
   opus:   1000000,
@@ -1046,9 +1053,130 @@ const server = http.createServer(async (req, res) => {
   sendText(res, 404, "not found");
 });
 
+// ---------------------------------------------------------------------------
+// Codex session watcher — tails ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+// ---------------------------------------------------------------------------
+function findRecentCodexFiles() {
+  const cutoff = Date.now() - GONE_AFTER_MS;
+  const results = [];
+  if (!fs.existsSync(CODEX_SESSIONS_DIR)) return results;
+  // Walk YYYY/MM/DD directory structure
+  for (const year of fs.readdirSync(CODEX_SESSIONS_DIR)) {
+    const yearDir = path.join(CODEX_SESSIONS_DIR, year);
+    if (!/^\d{4}$/.test(year) || !fs.statSync(yearDir).isDirectory()) continue;
+    for (const month of fs.readdirSync(yearDir)) {
+      const monthDir = path.join(yearDir, month);
+      if (!fs.statSync(monthDir).isDirectory()) continue;
+      for (const day of fs.readdirSync(monthDir)) {
+        const dayDir = path.join(monthDir, day);
+        if (!fs.statSync(dayDir).isDirectory()) continue;
+        for (const file of fs.readdirSync(dayDir)) {
+          if (!file.endsWith(".jsonl")) continue;
+          const filePath = path.join(dayDir, file);
+          try {
+            const stat = fs.statSync(filePath);
+            if (stat.mtimeMs >= cutoff) results.push({ filePath, mtime: stat.mtimeMs });
+          } catch { /* skip */ }
+        }
+      }
+    }
+  }
+  return results;
+}
+
+function scanCodexSessions() {
+  const now = Date.now();
+  const activeFiles = findRecentCodexFiles();
+  const activeFilePaths = new Set(activeFiles.map(f => f.filePath));
+
+  // Expire Codex sessions whose file has gone stale
+  for (const [filePath, fst] of codexFileState) {
+    if (!activeFilePaths.has(filePath)) {
+      const s = sessions.get(fst.tabId);
+      if (s && s.state !== "gone") {
+        sessions.set(fst.tabId, { ...s, state: "gone", lastSeen: now });
+      }
+    }
+  }
+
+  for (const { filePath, mtime } of activeFiles) {
+    if (dismissedIds.has(`codex-${path.basename(filePath)}`)) continue;
+
+    let fst = codexFileState.get(filePath);
+    if (!fst) {
+      fst = { tabId: null, bytesRead: 0, state: "idle", cwd: null, title: "Codex", ts: now, model: null };
+      codexFileState.set(filePath, fst);
+    }
+
+    // Read only new bytes since last scan
+    let fd;
+    try {
+      fd = fs.openSync(filePath, "r");
+      const stat = fs.fstatSync(fd);
+      if (stat.size <= fst.bytesRead) { fs.closeSync(fd); continue; }
+      const buf = Buffer.alloc(stat.size - fst.bytesRead);
+      fs.readSync(fd, buf, 0, buf.length, fst.bytesRead);
+      fs.closeSync(fd);
+      fst.bytesRead = stat.size;
+
+      const newLines = buf.toString("utf8").split("\n").filter(l => l.trim());
+      for (const line of newLines) {
+        let obj;
+        try { obj = JSON.parse(line); } catch { continue; }
+
+        if (obj.type === "session_meta") {
+          const p = obj.payload || {};
+          fst.cwd = p.cwd || fst.cwd;
+          fst.model = p.model || fst.model;
+          const sessionId = p.id || path.basename(filePath, ".jsonl");
+          fst.tabId = "codex-" + sessionId.slice(0, 8);
+          // Derive title from cwd
+          const parts = (fst.cwd || "").split(/[/\\]/).filter(Boolean);
+          fst.title = parts[parts.length - 1] || "Codex";
+        }
+
+        if (obj.type === "event_msg") {
+          const pt = (obj.payload || {}).type;
+          if (pt === "task_started" || pt === "user_message") {
+            fst.state = "running";
+            if (pt === "user_message") fst.lastUserMsg = (obj.payload.message || "").slice(0, 200);
+          } else if (pt === "task_complete") {
+            fst.state = "review";
+            fst.lastAgentMsg = ((obj.payload || {}).last_agent_message || "").slice(0, 200);
+          }
+        }
+      }
+    } catch { if (fd !== undefined) try { fs.closeSync(fd); } catch {} continue; }
+
+    if (!fst.tabId) continue; // no session_meta seen yet
+    if (dismissedIds.has(fst.tabId)) continue;
+
+    const prev = sessions.get(fst.tabId);
+    const state = mtime < now - GONE_AFTER_MS ? "gone" : fst.state;
+    sessions.set(fst.tabId, {
+      ...(prev || {}),
+      title: fst.title,
+      state,
+      url: fst.cwd || "",
+      source: "codex",
+      detail: state === "review" ? "Ready for review"
+            : state === "running" ? "Working…"
+            : null,
+      ts: (prev && prev.ts) || fst.ts,
+      lastSeen: now,
+    });
+
+    if (!prev && state === "review") playAlert();
+  }
+}
+
 // Start the session scanner so existing CLI sessions show up immediately.
 scanCliSessions();
 setInterval(scanCliSessions, 2000);
+
+// Start the Codex watcher in parallel.
+scanCodexSessions();
+setInterval(scanCodexSessions, 3000);
 
 server.listen(PORT, HOST, () => {
   console.log(`claude_cli_alert running at http://${HOST}:${PORT}`);
