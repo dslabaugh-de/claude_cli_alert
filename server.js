@@ -10,7 +10,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const readline = require("readline");
-const { spawn, execSync } = require("child_process");
+const { spawn, exec, execSync } = require("child_process");
 
 // ---------------------------------------------------------------------------
 // Config
@@ -210,29 +210,26 @@ function scanCliSessions() {
 // ---------------------------------------------------------------------------
 function playAlert() {
   const sound = resolveAlertSoundPath();
-  if (!sound) return; // muted
-  if (!fs.existsSync(sound)) return;
-  try {
-    let child;
-    if (IS_MAC) {
-      child = spawn("/usr/bin/afplay", [sound], { stdio: "ignore", detached: true });
-    } else if (IS_WIN) {
-      // Use PowerShell's SoundPlayer. -WindowStyle Hidden prevents a flash.
-      // Wrapping with Start-Process returns immediately without blocking.
-      const psCmd = `(New-Object Media.SoundPlayer '${sound.replace(/'/g, "''")}').PlaySync()`;
-      child = spawn(
-        "powershell.exe",
-        ["-NoProfile", "-WindowStyle", "Hidden", "-Command", psCmd],
-        { stdio: "ignore", detached: true }
-      );
-    } else {
-      return; // unsupported platform — no sound
-    }
-    child.on("error", () => {});
-    child.unref();
-  } catch {
-    // best-effort: never crash the server on a missing audio subsystem
+  if (!sound) return;
+  if (!fs.existsSync(sound)) {
+    console.log("[alert] sound file missing:", sound);
+    return;
   }
+  if (IS_MAC) {
+    exec(`afplay "${sound}"`, (err) => {
+      if (err) console.log("[alert] afplay error:", err.message);
+    });
+  } else if (IS_WIN) {
+    // PowerShell SoundPlayer via exec() — running through the shell keeps
+    // the child properly attached to the user's audio session, which
+    // stdio:"ignore" + windowsHide spawn can break on some setups.
+    const safe = sound.replace(/'/g, "''");
+    const cmd = `powershell -NoProfile -Command "(New-Object Media.SoundPlayer '${safe}').PlaySync()"`;
+    exec(cmd, (err, stdout, stderr) => {
+      if (err) console.log("[alert] powershell error:", err.message, stderr);
+    });
+  }
+  console.log("[alert] playing", sound);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,11 +312,28 @@ async function handleBuddyImport(req, res) {
     name = (name || "custom").toString();
     const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40) || "custom";
     const clean = sanitizeBuddyText(content);
-    // Bump mtime so this new file wins the "most recently modified" sort
+
+    // Make sure the buddy dir exists (belt + suspenders — install.command
+    // should already have created it, but if someone runs from a fresh
+    // clone without install, fall back gracefully).
+    try {
+      fs.mkdirSync(BUDDY_DIR, { recursive: true });
+    } catch {}
+
     const filepath = path.join(BUDDY_DIR, safeName + ".txt");
-    fs.writeFileSync(filepath, clean, "utf8");
-    return sendJSON(res, 200, { ok: true, name: safeName });
+    try {
+      fs.writeFileSync(filepath, clean, "utf8");
+    } catch (err) {
+      console.log("[import] write failed:", err.code, err.message, "path:", filepath);
+      return sendJSON(res, 500, {
+        error: `write failed (${err.code || "unknown"}): ${err.message}`,
+        path: filepath,
+      });
+    }
+    console.log("[import] wrote", filepath, `(${clean.length} chars)`);
+    return sendJSON(res, 200, { ok: true, name: safeName, path: filepath });
   } catch (err) {
+    console.log("[import] exception:", err.message);
     return sendJSON(res, 400, { error: "import failed: " + err.message });
   }
 }
