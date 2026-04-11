@@ -98,6 +98,7 @@ const CLAUDE_HISTORY_FILE = path.join(CLAUDE_HOME, "history.jsonl");
 // Codex writes JSONL session files here: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
 const CODEX_HOME = path.join(os.homedir(), ".codex");
 const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, "sessions");
+const CODEX_ACTIVE_WINDOW_MS = 2 * 60 * 1000; // only show recently active running Codex sessions
 
 // Per-file tracking for the Codex watcher: filename → { tabId, bytesRead, state, cwd, title, ts }
 const codexFileState = new Map();
@@ -180,7 +181,7 @@ function isSessionJsonlStale(sessionId, cwd) {
       }
     }
   } catch { return false; }
-  if (!ownMtime || !projPath) return false; // JSONL not found — not stale
+  if (!ownMtime || !projPath) return true; // JSONL not found — treat as stale
   if (Date.now() - ownMtime < TWO_HOURS) return false; // still fresh
   // A newer JSONL in the same project dir means user started a new conversation
   try {
@@ -1126,7 +1127,7 @@ const server = http.createServer(async (req, res) => {
 // Codex session watcher — tails ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
 // ---------------------------------------------------------------------------
 function findRecentCodexFiles() {
-  const cutoff = Date.now() - GONE_AFTER_MS;
+  const cutoff = Date.now() - CODEX_ACTIVE_WINDOW_MS;
   const results = [];
   if (!fs.existsSync(CODEX_SESSIONS_DIR)) return results;
   // Walk YYYY/MM/DD directory structure
@@ -1150,7 +1151,10 @@ function findRecentCodexFiles() {
       }
     }
   }
-  return results;
+  // Only keep the most recent N files — Codex creates one per rollout and
+  // they pile up fast. Show the latest 3 so the dashboard stays readable.
+  results.sort((a, b) => b.mtime - a.mtime);
+  return results.slice(0, 3);
 }
 
 function scanCodexSessions() {
@@ -1158,13 +1162,10 @@ function scanCodexSessions() {
   const activeFiles = findRecentCodexFiles();
   const activeFilePaths = new Set(activeFiles.map(f => f.filePath));
 
-  // Expire Codex sessions whose file has gone stale
+  // Drop Codex sessions whose file has gone stale or is no longer active.
   for (const [filePath, fst] of codexFileState) {
     if (!activeFilePaths.has(filePath)) {
-      const s = sessions.get(fst.tabId);
-      if (s && s.state !== "gone") {
-        sessions.set(fst.tabId, { ...s, state: "gone", lastSeen: now });
-      }
+      if (fst.tabId) sessions.delete(fst.tabId);
     }
   }
 
@@ -1223,15 +1224,23 @@ function scanCodexSessions() {
     if (!fst.tabId) continue; // no session_meta seen yet
     if (dismissedIds.has(fst.tabId)) continue;
 
+    const recentlyActive = mtime >= now - CODEX_ACTIVE_WINDOW_MS;
+    const state = recentlyActive ? fst.state : "gone";
+
+    // Only surface Codex sessions that are actively running now.
+    if (state !== "running") {
+      sessions.delete(fst.tabId);
+      continue;
+    }
+
     const prev = sessions.get(fst.tabId);
-    const state = mtime < now - GONE_AFTER_MS ? "gone" : fst.state;
     sessions.set(fst.tabId, {
       ...(prev || {}),
       title: fst.title,
-      state,
+      state: "running",
       url: fst.cwd || "",
       source: "codex",
-      detail: state === "running" ? "Working…" : null,
+      detail: "Working…",
       tokenUsage: fst.tokenUsage || null,
       ts: (prev && prev.ts) || fst.ts,
       lastSeen: now,
