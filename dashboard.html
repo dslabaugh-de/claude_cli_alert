@@ -229,6 +229,19 @@
     color: var(--charcoal);
     line-height: 1.45;
   }
+  .import-panel .import-hint {
+    font-size: 11px;
+    color: var(--gray);
+    margin-top: -6px;
+  }
+  .import-panel .import-hint code {
+    background: var(--gray-soft);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 10px;
+    color: var(--teal);
+    word-break: break-all;
+  }
   .import-panel details {
     background: var(--gray-soft);
     border-radius: 6px;
@@ -330,6 +343,15 @@
     font-family: ui-monospace, Menlo, Consolas, monospace;
     font-size: 11px;
     line-height: 1.4;
+    white-space: pre-wrap;
+  }
+  .import-status code {
+    background: var(--gray-soft);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--teal);
+    word-break: break-all;
   }
 
   /* ---------------- sound chooser popover ---------------- */
@@ -794,6 +816,7 @@
     <div class="import-panel" id="import-panel" hidden>
       <h3>Import a buddy</h3>
       <p>Paste your buddy card below and hit save. Stars, emoji, and tabs are stripped automatically.</p>
+      <p class="import-hint">Import saves to <code id="import-location">~/.claude-alert/buddy/imported.txt</code></p>
       <textarea id="buddy-paste" placeholder="Paste your buddy card text here..." rows="12"></textarea>
       <div class="import-buttons">
         <button class="cancel" id="cancel-import">Cancel</button>
@@ -1184,6 +1207,8 @@
       status.className = "import-status error";
       return;
     }
+    status.textContent = "Saving…";
+    status.className = "import-status";
     try {
       const r = await fetch("/buddy/import", {
         method: "POST",
@@ -1192,23 +1217,42 @@
       });
       const data = await r.json();
       if (data.ok) {
-        status.textContent = "Saved — refreshing…";
+        status.innerHTML = `Saved to <code>${escapeHtml(data.path)}</code><br>Refreshing buddy…`;
         status.className = "import-status";
         await fetchBuddy();
         setTimeout(() => {
           document.getElementById("import-panel").setAttribute("hidden", "");
           status.textContent = "";
           document.getElementById("buddy-paste").value = "";
-        }, 900);
+        }, 1600);
       } else {
-        status.textContent = data.error || "Failed to save";
+        let msg = data.error || "Failed to save (unknown error)";
+        if (Array.isArray(data.attempts)) {
+          msg += "\n\nTried:\n" + data.attempts
+            .map(a => `  • ${a.dir}\n    step: ${a.step}${a.error ? "\n    error: " + a.error : ""}`)
+            .join("\n");
+        }
+        status.textContent = msg;
         status.className = "import-status error";
       }
     } catch (e) {
-      status.textContent = "Failed to save: " + e.message;
+      status.textContent = "Network error: " + e.message;
       status.className = "import-status error";
     }
   });
+
+  // On boot, ask the server where it'll save imports so we can show the user.
+  (async () => {
+    try {
+      const r = await fetch("/buddy/dir");
+      if (r.ok) {
+        const d = await r.json();
+        if (d.buddyDir) {
+          document.getElementById("import-location").textContent = d.buddyDir + "/imported.txt";
+        }
+      }
+    } catch {}
+  })();
 
   // ----- sound chooser -----
   async function openSoundChooser() {

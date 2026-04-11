@@ -238,25 +238,62 @@ function sanitizeBuddyText(text) {
     .replace(/[\u{1F000}-\u{1FFFF}]/gu, ""); // emoji planes
 }
 
-// Heuristically extract just the face/portrait lines from a buddy card.
-// Looks for a contiguous block starting with an "ears" line (containing /\ /\)
-// and ending with a "chin" line (containing ` or ´).
+// ----- Face extraction from a buddy card -----
+// Handles a wide variety of ASCII art styles, not just Cinder's.
+// Strategies (first match wins):
+//   1. /\ /\ "ears" pattern bounded by a ` or ´ "chin" line
+//   2. A line containing paired eyes (e.g. "o o", "· ·", "^ ^") plus neighbors
+//   3. The first block of 2-7 consecutive short lines after any header
+//   4. null (dashboard falls back to a default face)
+
+function stripCardBorders(lines) {
+  // Drop the outermost border rows entirely (all box-drawing chars),
+  // then strip leading/trailing border chars from the remaining lines.
+  return lines
+    .filter((l) => !/^\s*[╭╮╰╯─━═┌┐└┘]+\s*$/.test(l))
+    .map((l) =>
+      l
+        .replace(/^\s*[│|║]\s?/, "")
+        .replace(/\s?[│|║]\s*$/, "")
+        .replace(/\s+$/, "")
+    );
+}
+
+function dedent(lines) {
+  const nonEmpty = lines.filter((l) => l.trim());
+  if (nonEmpty.length === 0) return lines;
+  const indents = nonEmpty.map((l) => (l.match(/^ */) || [""])[0].length);
+  const minIndent = Math.min(...indents);
+  return lines.map((l) => l.slice(minIndent));
+}
+
+function isLikelyBorder(line) {
+  const t = line.trim();
+  if (!t) return true;
+  return /^[─━═│║╭╮╯╰┌┐└┘┬┴├┤┼+=\-_*#~]+$/.test(t);
+}
+
+function isLikelyFaceLine(line) {
+  const t = line.trim();
+  if (!t) return false;
+  if (t.length > 32) return false;
+  // Face lines tend to have a low letter/total ratio
+  const letters = (t.match(/[a-zA-Z]/g) || []).length;
+  const ratio = letters / t.length;
+  return ratio < 0.35;
+}
+
 function extractFace(content) {
   const rawLines = content.split("\n");
-  // Strip card border characters and trailing whitespace
-  const clean = rawLines.map((l) =>
-    l
-      .replace(/^[│|]\s?/, "")
-      .replace(/\s?[│|]\s*$/, "")
-      .replace(/\s+$/, "")
-  );
-  let start = -1;
-  let end = -1;
+  const clean = stripCardBorders(rawLines);
+
+  // Strategy 1: original /\ /\ ears pattern
+  let start = -1, end = -1;
   for (let i = 0; i < clean.length; i++) {
     if (/\/\\.*\/\\/.test(clean[i])) {
       start = i;
       for (let j = i + 1; j < Math.min(i + 8, clean.length); j++) {
-        if (/[`´']-+[`´']/.test(clean[j]) || /[`´'][^A-Za-z0-9]+[`´']/.test(clean[j])) {
+        if (/[`´'][^A-Za-z0-9]+[`´']/.test(clean[j])) {
           end = j;
           break;
         }
@@ -264,12 +301,48 @@ function extractFace(content) {
       break;
     }
   }
-  if (start < 0 || end < 0) return null;
-  // Trim leading common indent so the face sits flush-left
-  const slice = clean.slice(start, end + 1);
-  const indents = slice.map((l) => (l.match(/^ */) || [""])[0].length);
-  const minIndent = Math.min(...indents);
-  return slice.map((l) => l.slice(minIndent)).join("\n");
+  if (start >= 0 && end >= 0) {
+    return dedent(clean.slice(start, end + 1)).join("\n");
+  }
+
+  // Strategy 2: an "eyes" line — two identical small chars separated by
+  // spaces, optionally wrapped in parens/brackets.
+  const eyesRe = /[\(\[{]?\s*([o·\^O0*\-\~\.xX])\s{1,6}\1\s*[\)\]}]?/;
+  for (let i = 0; i < clean.length; i++) {
+    if (eyesRe.test(clean[i]) && !isLikelyBorder(clean[i])) {
+      // Grab up to 2 lines before and 3 after as the face block
+      const s = Math.max(0, i - 2);
+      const e = Math.min(clean.length - 1, i + 3);
+      // Trim empty lines at the edges
+      const block = clean.slice(s, e + 1);
+      while (block.length && !block[0].trim()) block.shift();
+      while (block.length && !block[block.length - 1].trim()) block.pop();
+      if (block.length >= 1 && block.length <= 7) {
+        return dedent(block).join("\n");
+      }
+    }
+  }
+
+  // Strategy 3: first contiguous run of 2-7 short face-ish lines
+  let blockStart = -1, blockEnd = -1;
+  for (let i = 0; i < clean.length; i++) {
+    const line = clean[i];
+    if (isLikelyFaceLine(line) && !isLikelyBorder(line)) {
+      if (blockStart < 0) blockStart = i;
+      blockEnd = i;
+    } else if (blockStart >= 0) {
+      // Hit a non-face line. Accept the block if it has enough lines.
+      if (blockEnd - blockStart + 1 >= 2) break;
+      blockStart = -1;
+      blockEnd = -1;
+    }
+  }
+  if (blockStart >= 0 && blockEnd - blockStart + 1 >= 2 && blockEnd - blockStart + 1 <= 7) {
+    return dedent(clean.slice(blockStart, blockEnd + 1)).join("\n");
+  }
+
+  // No recognizable face — let the client use its default
+  return null;
 }
 
 function readBuddyCard() {
@@ -740,6 +813,13 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "POST" && url === "/buddy/import") {
     return handleBuddyImport(req, res);
+  }
+  if (req.method === "GET" && url === "/buddy/dir") {
+    return sendJSON(res, 200, {
+      buddyDir: BUDDY_DIR,
+      home: os.homedir(),
+      platform: process.platform,
+    });
   }
   if (req.method === "GET" && url === "/sounds") {
     return handleSoundsList(res);
