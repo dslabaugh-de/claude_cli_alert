@@ -98,8 +98,6 @@ const CLAUDE_HISTORY_FILE = path.join(CLAUDE_HOME, "history.jsonl");
 // Codex writes JSONL session files here: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
 const CODEX_HOME = path.join(os.homedir(), ".codex");
 const CODEX_SESSIONS_DIR = path.join(CODEX_HOME, "sessions");
-const CODEX_ACTIVE_WINDOW_MS = 2 * 60 * 1000; // only show recently active running Codex sessions
-
 // Per-file tracking for the Codex watcher: filename → { tabId, bytesRead, state, cwd, title, ts }
 const codexFileState = new Map();
 
@@ -263,7 +261,7 @@ function scanCliSessions() {
     } catch {
       continue;
     }
-    const { pid, sessionId, cwd, name, entrypoint } = data;
+    const { pid, sessionId, cwd, entrypoint } = data;
     if (!pid || !sessionId) continue;
     if (entrypoint && entrypoint !== "cli") continue;
 
@@ -279,16 +277,12 @@ function scanCliSessions() {
       if (!alive && s.state !== "gone") s.state = "gone";
       if (alive && isSessionJsonlStale(sessionId, cwd)) s.state = "gone";
       if (alive) s.lastSeen = now;
-      // The scanner's session file can lag behind a terminal /rename hook.
-      // Only backfill a name from disk when we don't already have one.
-      if (name && !s.sessionName) s.sessionName = name;
     } else if (isSessionJsonlStale(sessionId, cwd)) {
-      // Stale: don't create tile, but propagate /rename to active hook session
-      propagateNameToProjectSessions(sessionId, name);
+      // Stale: don't create tile.
     } else {
       sessions.set(tabId, {
         title: projectNameFromCwd(cwd),
-        sessionName: name || null,
+        sessionName: null,
         state: alive ? "idle" : "gone",
         url: cwd || null,
         source: "cli",
@@ -631,7 +625,7 @@ async function handleUpdate(req, res) {
     return sendJSON(res, 400, { error: "bad json" });
   }
 
-  const { tabId, title, state, url, ts, detail, source, sessionName } = body;
+  const { tabId, sessionId, title, state, url, ts, detail, source, sessionName } = body;
   if (!tabId || !state) return sendJSON(res, 400, { error: "missing tabId or state" });
 
   // Hook update revives a dismissed session
@@ -656,6 +650,7 @@ async function handleUpdate(req, res) {
   // update the live fields.
   sessions.set(tabId, {
     ...(prev || {}),
+    sessionId: sessionId || (prev && prev.sessionId) || null,
     title: title || (prev && prev.title) || "Claude session",
     sessionName: sessionName !== undefined ? sessionName : ((prev && prev.sessionName) || null),
     state,
@@ -796,6 +791,42 @@ function getSessionSlug(sessionId, cwd) {
   return latestSlug;
 }
 
+const renameCache = new Map(); // path -> { mtime, name }
+function getSessionRename(sessionId, cwd) {
+  const jsonlPath = findSessionJsonl(sessionId, cwd);
+  if (!jsonlPath) return null;
+  let stat;
+  try { stat = fs.statSync(jsonlPath); } catch { return null; }
+
+  const cached = renameCache.get(jsonlPath);
+  if (cached && cached.mtime === stat.mtimeMs) return cached.name;
+
+  let latestName = null;
+  try {
+    const content = fs.readFileSync(jsonlPath, "utf8");
+    for (const line of content.split("\n")) {
+      if (!line.includes('"subtype":"local_command"') || !line.includes("/rename")) continue;
+      try {
+        const d = JSON.parse(line);
+        if (d.type !== "system" || d.subtype !== "local_command") continue;
+        const text = String(d.content || "");
+        const stdoutMatch = text.match(/Session renamed to:\s*([^<\n]+)/i);
+        if (stdoutMatch && stdoutMatch[1].trim()) {
+          latestName = stdoutMatch[1].trim();
+          continue;
+        }
+        const argMatch = text.match(/<command-args>([\s\S]*?)<\/command-args>/i);
+        if (argMatch && argMatch[1].trim()) {
+          latestName = argMatch[1].trim();
+        }
+      } catch {}
+    }
+  } catch {}
+
+  renameCache.set(jsonlPath, { mtime: stat.mtimeMs, name: latestName });
+  return latestName;
+}
+
 function handleStatus(res) {
   const now = Date.now();
   for (const [, s] of sessions) {
@@ -805,14 +836,16 @@ function handleStatus(res) {
   }
   const list = Array.from(sessions.entries()).map(([id, s]) => {
     const customName = config.customNames && config.customNames[id];
-    const fullSessionId = sessionIdForTabId(id);
+    const fullSessionId = s.sessionId || sessionIdForTabId(id);
+    const renamedSessionName = fullSessionId ? getSessionRename(fullSessionId, s.url) : null;
     const slug = fullSessionId ? getSessionSlug(fullSessionId, s.url) : null;
     const firstPrompt = fullSessionId ? firstPromptForSession(fullSessionId) : null;
     return {
       tabId: id,
       ...s,
       project: s.title,
-      title: customName || s.sessionName || s.title,
+      title: customName || renamedSessionName || s.sessionName || s.title,
+      sessionName: renamedSessionName || s.sessionName || null,
       customName: customName || null,
       slug,
       firstPrompt,
@@ -1127,7 +1160,6 @@ const server = http.createServer(async (req, res) => {
 // Codex session watcher — tails ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
 // ---------------------------------------------------------------------------
 function findRecentCodexFiles() {
-  const cutoff = Date.now() - CODEX_ACTIVE_WINDOW_MS;
   const results = [];
   if (!fs.existsSync(CODEX_SESSIONS_DIR)) return results;
   // Walk YYYY/MM/DD directory structure
@@ -1145,7 +1177,7 @@ function findRecentCodexFiles() {
           const filePath = path.join(dayDir, file);
           try {
             const stat = fs.statSync(filePath);
-            if (stat.mtimeMs >= cutoff) results.push({ filePath, mtime: stat.mtimeMs });
+            results.push({ filePath, mtime: stat.mtimeMs });
           } catch { /* skip */ }
         }
       }
@@ -1157,24 +1189,26 @@ function findRecentCodexFiles() {
   return results.slice(0, 3);
 }
 
+function isCodexApprovalPrompt(text) {
+  const msg = String(text || "").replace(/\s+/g, " ").trim();
+  if (!msg) return false;
+  const asksToEdit = /would you like to make the following edits\?/i.test(msg);
+  const hasYesOption = /\b1\.\s*yes,\s*proceed\b/i.test(msg) || /\byes,\s*proceed\s*\(y\)/i.test(msg);
+  const hasNoOption = /\b3\.\s*no,\s*and tell codex what to do differently\b/i.test(msg)
+    || /tell codex what to do differently/i.test(msg);
+  return asksToEdit && hasYesOption && hasNoOption;
+}
+
 function scanCodexSessions() {
   const now = Date.now();
   const activeFiles = findRecentCodexFiles();
-  const activeFilePaths = new Set(activeFiles.map(f => f.filePath));
-
-  // Drop Codex sessions whose file has gone stale or is no longer active.
-  for (const [filePath, fst] of codexFileState) {
-    if (!activeFilePaths.has(filePath)) {
-      if (fst.tabId) sessions.delete(fst.tabId);
-    }
-  }
 
   for (const { filePath, mtime } of activeFiles) {
     if (dismissedIds.has(`codex-${path.basename(filePath)}`)) continue;
 
     let fst = codexFileState.get(filePath);
     if (!fst) {
-      fst = { tabId: null, bytesRead: 0, state: "idle", cwd: null, title: "Codex", ts: now, model: null, tokenUsage: null };
+      fst = { tabId: null, bytesRead: 0, state: "idle", cwd: null, title: "Codex", ts: now, model: null, tokenUsage: null, explicitTitle: null, seedTitle: null };
       codexFileState.set(filePath, fst);
     }
 
@@ -1200,18 +1234,46 @@ function scanCodexSessions() {
           fst.model = p.model || fst.model;
           const sessionId = p.id || path.basename(filePath, ".jsonl");
           fst.tabId = "codex-" + sessionId.slice(0, 8);
-          // Derive title from cwd
+          // Derive a fallback title from cwd, but prefer explicit Codex names.
           const parts = (fst.cwd || "").split(/[/\\]/).filter(Boolean);
-          fst.title = parts[parts.length - 1] || "Codex";
+          fst.title = fst.explicitTitle || fst.seedTitle || parts[parts.length - 1] || "Codex";
+        }
+
+        if (obj.type === "custom-title") {
+          const title = String(obj.customTitle || "").trim();
+          if (title) {
+            fst.explicitTitle = title;
+            fst.title = title;
+          }
+        }
+
+        if (obj.type === "agent-name") {
+          const title = String(obj.agentName || "").trim();
+          if (title) {
+            fst.explicitTitle = title;
+            fst.title = title;
+          }
         }
 
         if (obj.type === "event_msg") {
           const pt = (obj.payload || {}).type;
           if (pt === "task_started" || pt === "user_message") {
             fst.state = "running";
-            if (pt === "user_message") fst.lastUserMsg = (obj.payload.message || "").slice(0, 200);
+            if (pt === "user_message") {
+              const raw = String((obj.payload || {}).message || "").trim();
+              fst.lastUserMsg = raw.slice(0, 200);
+              if (isCodexApprovalPrompt(raw)) {
+                fst.state = "waiting";
+              } else if (!fst.seedTitle && raw) {
+                const collapsed = raw.replace(/\s+/g, " ").trim();
+                const resumeMatch = collapsed.match(/^codex resume\s+(.+)$/i);
+                const derived = resumeMatch ? resumeMatch[1].trim() : collapsed;
+                fst.seedTitle = derived.length > 32 ? derived.slice(0, 29) + "..." : derived;
+                if (!fst.explicitTitle) fst.title = fst.seedTitle;
+              }
+            }
           } else if (pt === "task_complete") {
-            fst.state = "idle";
+            fst.state = "review";
             fst.lastAgentMsg = ((obj.payload || {}).last_agent_message || "").slice(0, 200);
           } else if (pt === "token_count") {
             const info = (obj.payload || {}).info;
@@ -1224,29 +1286,28 @@ function scanCodexSessions() {
     if (!fst.tabId) continue; // no session_meta seen yet
     if (dismissedIds.has(fst.tabId)) continue;
 
-    const recentlyActive = mtime >= now - CODEX_ACTIVE_WINDOW_MS;
-    const state = recentlyActive ? fst.state : "gone";
-
-    // Only surface Codex sessions that are actively running now.
-    if (state !== "running") {
-      sessions.delete(fst.tabId);
-      continue;
-    }
-
     const prev = sessions.get(fst.tabId);
+    const visibleState = fst.state === "waiting"
+      ? "waiting"
+      : (fst.state === "running" ? "running" : (fst.state === "review" ? "review" : "idle"));
     sessions.set(fst.tabId, {
       ...(prev || {}),
       title: fst.title,
-      state: "running",
+      state: visibleState,
       url: fst.cwd || "",
       source: "codex",
-      detail: "Working…",
+      detail:
+        visibleState === "waiting"
+          ? "Needs confirmation"
+          : visibleState === "running"
+          ? "Working…"
+          : (visibleState === "review" ? "Ready for review" : "Idle"),
       tokenUsage: fst.tokenUsage || null,
       ts: (prev && prev.ts) || fst.ts,
       lastSeen: now,
     });
 
-    if (!prev && state === "review") playAlert();
+    if ((!prev || prev.state !== visibleState) && (visibleState === "review" || visibleState === "waiting")) playAlert();
   }
 }
 

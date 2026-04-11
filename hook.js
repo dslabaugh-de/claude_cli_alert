@@ -29,7 +29,7 @@ process.stdin.on("end", () => {
   const event = payload.hook_event_name || payload.event || "";
   const sessionId = payload.session_id || "unknown";
   const cwd = payload.cwd || "";
-  const prompt = (payload.prompt || "").trim();
+  const prompt = String(payload.user_prompt || payload.prompt || "").trim();
   const tabId = "cli-" + sessionId.slice(0, 8);
 
   // Project name = last meaningful folder of cwd. If the leaf is a common
@@ -80,6 +80,7 @@ process.stdin.on("end", () => {
       if (newName) {
         const body = JSON.stringify({
           tabId,
+          sessionId,
           title: project,
           state: "idle",
           source: "cli",
@@ -110,14 +111,14 @@ process.stdin.on("end", () => {
       state = "review";
       detail = "Work complete";
     } else if (event === "Notification") {
-      state = "waiting";
+      const nt = payload.notification_type || "";
       const labels = {
         permission_prompt: "Permission needed",
-        idle_prompt: "Idle — waiting for input",
+        idle_prompt: "Idle",
         auth_success: "Auth complete",
         elicitation_dialog: "Question for you",
       };
-      const nt = payload.notification_type || "";
+      state = nt === "idle_prompt" ? "idle" : "waiting";
       detail = labels[nt] || nt || "Notification";
     } else if (event === "UserPromptSubmit") {
       state = "running";
@@ -132,6 +133,7 @@ process.stdin.on("end", () => {
 
   const body = JSON.stringify({
     tabId,
+    sessionId,
     title: project,
     state,
     source: "cli",
