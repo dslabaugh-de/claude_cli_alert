@@ -86,6 +86,7 @@ function resolveAlertSoundPath() {
 
 // Sessions go to "gone" after this many ms with no hook activity.
 const GONE_AFTER_MS = 4 * 60 * 60 * 1000; // 4 hours
+const GONE_PRUNE_MS = 10 * 60 * 1000; // remove gone sessions after 10 minutes
 
 // Claude Code writes one JSON file per active CLI session here.
 // We scan this directory to discover sessions that haven't fired a hook yet.
@@ -261,8 +262,9 @@ function scanCliSessions() {
     } catch {
       continue;
     }
-    const { pid, sessionId, cwd, name } = data;
+    const { pid, sessionId, cwd, name, entrypoint } = data;
     if (!pid || !sessionId) continue;
+    if (entrypoint && entrypoint !== "cli") continue;
 
     const tabId = "cli-" + sessionId.slice(0, 8);
     fileTabIds.add(tabId);
@@ -276,7 +278,9 @@ function scanCliSessions() {
       if (!alive && s.state !== "gone") s.state = "gone";
       if (alive && isSessionJsonlStale(sessionId, cwd)) s.state = "gone";
       if (alive) s.lastSeen = now;
-      if (name) s.sessionName = name;
+      // The scanner's session file can lag behind a terminal /rename hook.
+      // Only backfill a name from disk when we don't already have one.
+      if (name && !s.sessionName) s.sessionName = name;
     } else if (isSessionJsonlStale(sessionId, cwd)) {
       // Stale: don't create tile, but propagate /rename to active hook session
       propagateNameToProjectSessions(sessionId, name);
@@ -303,6 +307,15 @@ function scanCliSessions() {
       if (now - s.lastSeen > GHOST_TTL && s.state !== "gone") {
         s.state = "gone";
       }
+    }
+  }
+
+  // Prune dead CLI sessions after they've sat in "gone" long enough.
+  for (const [tabId, s] of sessions) {
+    if (!tabId.startsWith("cli-")) continue;
+    if (dismissedIds.has(tabId)) continue;
+    if (s.state === "gone" && now - (s.lastSeen || s.ts || now) > GONE_PRUNE_MS) {
+      sessions.delete(tabId);
     }
   }
 }
@@ -978,16 +991,36 @@ async function handleAllSessionStats(res) {
   const results = {};
   const promises = [];
   for (const [tabId, session] of sessions) {
-    if (!tabId.startsWith("cli-")) continue;
-    const sessionId = resolveSessionId(tabId);
-    if (!sessionId) continue;
-    const jsonlPath = findSessionJsonl(sessionId, session.url);
-    if (!jsonlPath) continue;
-    promises.push(
-      getSessionStats(jsonlPath).then((stats) => {
-        results[tabId] = stats;
-      })
-    );
+    if (tabId.startsWith("cli-")) {
+      const sessionId = resolveSessionId(tabId);
+      if (!sessionId) continue;
+      const jsonlPath = findSessionJsonl(sessionId, session.url);
+      if (!jsonlPath) continue;
+      promises.push(
+        getSessionStats(jsonlPath).then((stats) => {
+          results[tabId] = stats;
+        })
+      );
+    } else if (tabId.startsWith("codex-")) {
+      // Find the codexFileState entry for this tabId
+      for (const [, fst] of codexFileState) {
+        if (fst.tabId !== tabId) continue;
+        results[tabId] = {
+          model: fst.model || null,
+          contextUsed: 0,
+          contextWindow: 200000,
+          userMessages: 0,
+          assistantMessages: 0,
+          toolCalls: 0,
+          totalInputTokens: fst.tokenUsage ? (fst.tokenUsage.input_tokens || 0) : 0,
+          totalOutputTokens: fst.tokenUsage ? (fst.tokenUsage.output_tokens || 0) : 0,
+          firstUserMessage: fst.lastUserMsg || null,
+          lastUserMessage: fst.lastUserMsg || null,
+          lastAssistantMessage: fst.lastAgentMsg || null,
+        };
+        break;
+      }
+    }
   }
   await Promise.all(promises);
   sendJSON(res, 200, results);

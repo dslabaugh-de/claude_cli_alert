@@ -1025,9 +1025,12 @@
           if (prev.state !== "gone") setFlash(`${name} ended — session closed`);
           continue;
         }
-        // state flipped to "poof" → /clear
+        // state flipped to "poof" → /clear or /exit
         if (cur.state === "poof" && prev.state !== "poof") {
-          setFlash(`${name} cleared context`);
+          const msg = (cur.detail || "").toLowerCase().includes("closed")
+            ? "ended — session closed"
+            : "cleared context";
+          setFlash(`${name} ${msg}`);
         }
         // Codex task_complete: running → idle — show token summary
         if (cur.source === "codex" && cur.state === "idle" && prev.state === "running") {
@@ -1130,7 +1133,7 @@
         el.setAttribute("data-tab-id", s.tabId);
         el.innerHTML = `<div class="tile-inner"><div class="tile-face front">
           <div class="title-row"><span class="title">${escapeHtml(s.sessionName || s.slug || s.title || "Claude")}</span></div>
-          <div class="detail">Context cleared</div>
+          <div class="detail">${escapeHtml(s.detail || "Context cleared")}</div>
         </div></div>`;
         poofingTiles.set(s.tabId, el);
         el.addEventListener("animationend", () => {
@@ -1239,7 +1242,7 @@
                 </div>` : ""}
               ${aiMsg ? `
                 <div class="msg-block">
-                  <div class="msg-label">Claude</div>
+                  <div class="msg-label">${source === "codex" ? "Codex" : "Claude"}</div>
                   <div class="msg-text">${aiMsg}</div>
                 </div>` : ""}
               ${(!userMsg && !aiMsg) ? `<div class="msg-empty">No message history yet.</div>` : ""}
