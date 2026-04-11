@@ -1044,6 +1044,16 @@ const server = http.createServer(async (req, res) => {
       return sendText(res, 404, "font missing");
     }
   }
+  if (req.method === "GET" && (url === "/icon/claude" || url === "/icon/openai")) {
+    const file = url === "/icon/claude" ? "claude-icon.svg" : "openai-icon.svg";
+    try {
+      const buf = fs.readFileSync(path.join(ROOT, file));
+      res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=3600" });
+      return res.end(buf);
+    } catch {
+      return sendText(res, 404, "icon missing");
+    }
+  }
   // Test endpoint: trigger the alert sound on demand
   if (req.method === "POST" && url === "/test-alert") {
     playAlert();
@@ -1104,7 +1114,7 @@ function scanCodexSessions() {
 
     let fst = codexFileState.get(filePath);
     if (!fst) {
-      fst = { tabId: null, bytesRead: 0, state: "idle", cwd: null, title: "Codex", ts: now, model: null };
+      fst = { tabId: null, bytesRead: 0, state: "idle", cwd: null, title: "Codex", ts: now, model: null, tokenUsage: null };
       codexFileState.set(filePath, fst);
     }
 
@@ -1141,8 +1151,11 @@ function scanCodexSessions() {
             fst.state = "running";
             if (pt === "user_message") fst.lastUserMsg = (obj.payload.message || "").slice(0, 200);
           } else if (pt === "task_complete") {
-            fst.state = "review";
+            fst.state = "idle";
             fst.lastAgentMsg = ((obj.payload || {}).last_agent_message || "").slice(0, 200);
+          } else if (pt === "token_count") {
+            const info = (obj.payload || {}).info;
+            if (info && info.total_token_usage) fst.tokenUsage = info.total_token_usage;
           }
         }
       }
@@ -1159,9 +1172,8 @@ function scanCodexSessions() {
       state,
       url: fst.cwd || "",
       source: "codex",
-      detail: state === "review" ? "Ready for review"
-            : state === "running" ? "Working…"
-            : null,
+      detail: state === "running" ? "Working…" : null,
+      tokenUsage: fst.tokenUsage || null,
       ts: (prev && prev.ts) || fst.ts,
       lastSeen: now,
     });

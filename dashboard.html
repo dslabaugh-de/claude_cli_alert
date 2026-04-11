@@ -535,26 +535,18 @@
     color: var(--gray);
   }
 
-  /* Codex source badge */
-  .source-badge {
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--gray);
-    background: var(--gray-soft);
-    border: 1px solid var(--gray-border);
-    border-radius: 3px;
-    padding: 1px 4px;
+  /* Source icon next to session title */
+  .source-icon {
+    width: 14px;
+    height: 14px;
     flex-shrink: 0;
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 2px;
+    opacity: 0.85;
   }
   .tile[data-source="codex"] .tile-face.front {
     border-left: 3px solid #10a37f;
-  }
-  .tile[data-source="codex"] .source-badge {
-    color: #10a37f;
-    background: #edfaf5;
-    border-color: #10a37f40;
   }
 
   /* Running = light teal accent */
@@ -996,6 +988,18 @@
       </div>`;
   }
 
+  // ----- Codex token stats -----
+  function renderCodexStats(s) {
+    const t = s.tokenUsage;
+    if (!t) return "";
+    const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M"
+                   : n >= 1e3 ? (n / 1e3).toFixed(1) + "k"
+                   : String(n);
+    const cached   = t.cached_input_tokens   ? ` +${fmt(t.cached_input_tokens)} cached` : "";
+    const reasoning = t.reasoning_output_tokens ? ` (${fmt(t.reasoning_output_tokens)} rsn)` : "";
+    return `<div class="stats"><div class="tokens">${fmt(t.total_tokens)} total · ${fmt(t.input_tokens)} in${cached} · ${fmt(t.output_tokens)} out${reasoning}</div></div>`;
+  }
+
   // ----- lifecycle flash (for /clear and /exit events) -----
   let flashMsg = null;
   let flashTimeout = null;
@@ -1024,6 +1028,18 @@
         // state flipped to "poof" → /clear
         if (cur.state === "poof" && prev.state !== "poof") {
           setFlash(`${name} cleared context`);
+        }
+        // Codex task_complete: running → idle — show token summary
+        if (cur.source === "codex" && cur.state === "idle" && prev.state === "running") {
+          const t = cur.tokenUsage;
+          if (t) {
+            const fmtN = n => Number(n).toLocaleString();
+            const cached = t.cached_input_tokens ? ` (+ ${fmtN(t.cached_input_tokens)} cached)` : "";
+            const rsn    = t.reasoning_output_tokens ? ` (reasoning ${fmtN(t.reasoning_output_tokens)})` : "";
+            const tokenStr = `total=${fmtN(t.total_tokens)} input=${fmtN(t.input_tokens)}${cached} output=${fmtN(t.output_tokens)}${rsn}`;
+            const resumeName = escapeHtml(cur.customName || cur.sessionName || cur.title || "");
+            setFlash(`Token usage: ${tokenStr}<br><code style="font-size:11px">codex resume ${resumeName}</code>`, 10000);
+          }
         }
         // sessionName changed → /rename
         if (cur.sessionName && cur.sessionName !== prev.sessionName) {
@@ -1186,7 +1202,9 @@
       const startedAbs = s.ts ? new Date(s.ts).toLocaleString() : "";
       const userMsg = stats && stats.lastUserMessage ? escapeHtml(stats.lastUserMessage) : "";
       const aiMsg = stats && stats.lastAssistantMessage ? escapeHtml(stats.lastAssistantMessage) : "";
-      const sourceBadge = source === "codex" ? `<span class="source-badge">Codex</span>` : "";
+      const iconSrc = source === "codex" ? "/icon/openai" : "/icon/claude";
+      const iconAlt = source === "codex" ? "OpenAI" : "Claude";
+      const titleHint = source === "codex" ? "Codex session" : "Click to rename (or use /rename in Claude Code)";
 
       return `
         <div class="tile ${stateClass} ${flippedClass}" data-tab-id="${tabId}" data-source="${source}">
@@ -1200,12 +1218,12 @@
                 </div>
               </div>
               <div class="title-row">
-                ${sourceBadge}<span class="title" data-id="${tabId}" title="${source === "codex" ? "Codex session" : "Click to rename (or use /rename in Claude Code)"}">${title}</span>
+                <img src="${iconSrc}" class="source-icon" alt="${iconAlt}"><span class="title" data-id="${tabId}" title="${titleHint}">${title}</span>
               </div>
               <div class="detail">${detail || "&nbsp;"}</div>
               <div class="url" title="${url}">${url}</div>
               <div class="started" title="${escapeHtml(startedAbs)}">started ${escapeHtml(startedRel)}</div>
-              ${source !== "codex" ? renderStats(s.tabId) : ""}
+              ${source === "codex" ? renderCodexStats(s) : renderStats(s.tabId)}
             </div>
             <div class="tile-face back">
               <div class="tile-top">
