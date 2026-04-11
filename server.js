@@ -671,9 +671,11 @@ async function handleUpdate(req, res) {
 // ---------------------------------------------------------------------------
 // First-prompt cache — reads ~/.claude/history.jsonl and maps each
 // sessionId to the first `display` entry (the first user prompt typed in
-// that session). Re-read when the file's mtime changes.
+// that session). Also tracks /clear events so the scanner can poof tiles.
+// Re-read when the file's mtime changes.
 // ---------------------------------------------------------------------------
-let historyCache = { mtime: 0, byId: new Map() };
+let historyCache = { mtime: 0, byId: new Map(), clears: [] };
+let lastClearCheckTs = Date.now();
 
 function refreshHistoryCache() {
   let stat;
@@ -684,6 +686,7 @@ function refreshHistoryCache() {
   }
   if (stat.mtimeMs === historyCache.mtime) return;
   const byId = new Map();
+  const clears = [];
   try {
     const raw = fs.readFileSync(CLAUDE_HISTORY_FILE, "utf8");
     for (const line of raw.split("\n")) {
@@ -693,7 +696,12 @@ function refreshHistoryCache() {
       if (!d.sessionId || !d.display) continue;
       const text = String(d.display).trim();
       if (!text) continue;
-      // Skip slash commands and obvious system-injected prompts
+      // Track /clear events (history stores them with a trailing space sometimes)
+      if (/^\/clear\s*$/i.test(text)) {
+        clears.push({ sessionId: d.sessionId, timestamp: d.timestamp || 0 });
+        continue;
+      }
+      // Skip other slash commands and obvious system-injected prompts
       if (text.startsWith("<") || text.startsWith("/")) continue;
       // First-wins: only set if we haven't seen this sessionId yet
       if (!byId.has(d.sessionId)) byId.set(d.sessionId, text);
@@ -701,7 +709,25 @@ function refreshHistoryCache() {
   } catch {
     return;
   }
-  historyCache = { mtime: stat.mtimeMs, byId };
+  historyCache = { mtime: stat.mtimeMs, byId, clears };
+}
+
+// Check history.jsonl for new /clear entries and poof the matching tile.
+// Called from the scanCliSessions loop so it runs every 2s.
+function checkForClears() {
+  refreshHistoryCache();
+  const newClears = historyCache.clears.filter(c => c.timestamp > lastClearCheckTs);
+  lastClearCheckTs = Date.now();
+  for (const { sessionId } of newClears) {
+    const tabId = "cli-" + sessionId.slice(0, 8);
+    const s = sessions.get(tabId);
+    if (!s || dismissedIds.has(tabId) || s.state === "poof") continue;
+    sessions.set(tabId, { ...s, state: "poof", detail: "Context cleared", lastSeen: Date.now() });
+    setTimeout(() => {
+      sessions.delete(tabId);
+      dismissedIds.add(tabId);
+    }, 2500);
+  }
 }
 
 function firstPromptForSession(sessionId) {
@@ -1184,7 +1210,8 @@ function scanCodexSessions() {
 
 // Start the session scanner so existing CLI sessions show up immediately.
 scanCliSessions();
-setInterval(scanCliSessions, 2000);
+checkForClears();
+setInterval(() => { scanCliSessions(); checkForClears(); }, 2000);
 
 // Start the Codex watcher in parallel.
 scanCodexSessions();
