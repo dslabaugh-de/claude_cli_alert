@@ -1152,15 +1152,6 @@
     const order = { waiting: 0, review: 1, running: 2, idle: 3, gone: 4 };
     normalSessions.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9));
 
-    // Count how many sessions share each project name so we can add an
-    // auto-number (#1, #2...) when the user hasn't set a custom name.
-    const projectCounts = {};
-    for (const s of normalSessions) {
-      const key = s.project || s.title || "";
-      projectCounts[key] = (projectCounts[key] || 0) + 1;
-    }
-    const projectSeen = {};
-
     // Preserve which tiles are currently flipped so re-rendering (every 2s)
     // doesn't flip them back. Keyed by tabId.
     const flipped = new Set();
@@ -1169,32 +1160,31 @@
       if (id) flipped.add(id);
     });
 
+    // Two-pass title resolution so ANY duplicate display name gets a #N suffix,
+    // regardless of whether it came from customName, sessionName, slug, or cwd.
+    function resolveRawTitle(s) {
+      if (s.customName) return s.customName;
+      if (s.sessionName) return s.sessionName;
+      if (s.slug) return s.slug;
+      return s.title || (s.source === "codex" ? "Codex" : "Claude session");
+    }
+    const titleCounts = {};
+    for (const s of normalSessions) {
+      const k = resolveRawTitle(s);
+      titleCounts[k] = (titleCounts[k] || 0) + 1;
+    }
+    const titleSeen = {};
+
     tiles.innerHTML = normalSessions.map(s => {
       const stateClass = s.state;
       const stateLabel = STATE_LABELS[s.state] || s.state;
       const detail = s.detail ? escapeHtml(s.detail) : "";
       const stats = sessionStats[s.tabId];
 
-      // Title fallback chain:
-      //   1. customName (dashboard click-rename)
-      //   2. sessionName — set by /rename in Claude Code terminal
-      //   3. slug — Claude Code's internal session name
-      //      ("elegant-whistling-thunder")
-      //   4. cwd project name + auto #N if multiple share a folder
-      let titleText;
-      if (s.customName) {
-        titleText = s.customName;
-      } else if (s.sessionName) {
-        titleText = s.sessionName;
-      } else if (s.slug) {
-        titleText = s.slug;
-      } else {
-        titleText = s.title || "Claude session";
-        const key = s.project || s.title || "";
-        if (projectCounts[key] > 1) {
-          projectSeen[key] = (projectSeen[key] || 0) + 1;
-          titleText += ` #${projectSeen[key]}`;
-        }
+      let titleText = resolveRawTitle(s);
+      if (titleCounts[titleText] > 1) {
+        titleSeen[titleText] = (titleSeen[titleText] || 0) + 1;
+        titleText += ` #${titleSeen[titleText]}`;
       }
       const title = escapeHtml(titleText);
       const url = s.url ? escapeHtml(s.url) : "";
@@ -1207,7 +1197,7 @@
       const aiMsg = stats && stats.lastAssistantMessage ? escapeHtml(stats.lastAssistantMessage) : "";
       const iconSrc = source === "codex" ? "/icon/openai" : "/icon/claude";
       const iconAlt = source === "codex" ? "OpenAI" : "Claude";
-      const titleHint = source === "codex" ? "Codex session" : "Click to rename (or use /rename in Claude Code)";
+      const titleHint = "Click to rename";
 
       return `
         <div class="tile ${stateClass} ${flippedClass}" data-tab-id="${tabId}" data-source="${source}">
