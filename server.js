@@ -152,6 +152,88 @@ function projectNameFromCwd(cwd) {
   return leaf || "Claude Code";
 }
 
+
+// If the session file's conversation JSONL is stale (>2h old) and a newer
+// conversation exists in the same project dir, the user started a fresh session.
+// Retire the old tile so it doesn't ghost the active one.
+function isSessionJsonlStale(sessionId, cwd) {
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
+  // cwdToProjectDir is lossy (dots in dir names), so scan all project dirs
+  // to find the one containing this sessionId's JSONL.
+  let ownMtime = 0;
+  let projPath = null;
+  try {
+    for (const dir of fs.readdirSync(CLAUDE_PROJECTS_DIR)) {
+      const candidate = path.join(CLAUDE_PROJECTS_DIR, dir, sessionId + ".jsonl");
+      if (fs.existsSync(candidate)) {
+        ownMtime = fs.statSync(candidate).mtimeMs;
+        projPath = path.join(CLAUDE_PROJECTS_DIR, dir);
+        break;
+      }
+    }
+  } catch { return false; }
+  if (!ownMtime || !projPath) return false; // JSONL not found — not stale
+  if (Date.now() - ownMtime < TWO_HOURS) return false; // still fresh
+  // A newer JSONL in the same project dir means user started a new conversation
+  try {
+    const files = fs.readdirSync(projPath).filter(f => f.endsWith(".jsonl"));
+    const newestMtime = Math.max(...files.map(f => {
+      try { return fs.statSync(path.join(projPath, f)).mtimeMs; } catch { return 0; }
+    }));
+    return newestMtime > ownMtime;
+  } catch { return false; }
+}
+
+
+// When a session file has a name but its JSONL is stale (conversation was cleared),
+// find any hook-only session whose JSONL lives in the same project dir and propagate
+// the name — so /rename always shows up on the active tile.
+function propagateNameToProjectSessions(sessionId, name) {
+  if (!name) return;
+  // Find the project dir that contains this sessionId's JSONL
+  let projPath = null;
+  try {
+    for (const dir of fs.readdirSync(CLAUDE_PROJECTS_DIR)) {
+      if (fs.existsSync(path.join(CLAUDE_PROJECTS_DIR, dir, sessionId + ".jsonl"))) {
+        projPath = path.join(CLAUDE_PROJECTS_DIR, dir);
+        break;
+      }
+    }
+  } catch {}
+  if (!projPath) return;
+
+  // Find hook-only sessions (no pid) whose JSONL is in the same project dir
+  for (const [tabId, s] of sessions) {
+    if (s.pid) continue; // skip scanner-sourced sessions
+    const hookSessionId = tabId.startsWith("cli-") ? tabId.slice(4) : null;
+    if (!hookSessionId) continue;
+    // Check by looking for full UUID — expand prefix to full UUID
+    let fullId = null;
+    try {
+      for (const dir of fs.readdirSync(CLAUDE_PROJECTS_DIR)) {
+        const dirPath = path.join(CLAUDE_PROJECTS_DIR, dir);
+        try {
+          for (const f of fs.readdirSync(dirPath)) {
+            if (f.endsWith(".jsonl") && f.startsWith(hookSessionId)) {
+              if (path.join(CLAUDE_PROJECTS_DIR, dir) === projPath) {
+                fullId = f.replace(".jsonl", "");
+              }
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+    if (fullId) {
+      s.sessionName = name;
+      // Clear customName so terminal /rename beats dashboard click-rename
+      if (config.customNames && config.customNames[tabId]) {
+        delete config.customNames[tabId];
+        saveConfig(config);
+      }
+    }
+  }
+}
+
 function scanCliSessions() {
   let files;
   try {
@@ -161,6 +243,10 @@ function scanCliSessions() {
   }
 
   const now = Date.now();
+
+  // Build a set of tabIds that have a real session file so we can
+  // identify and expire ghost sessions (created only from hook events).
+  const fileTabIds = new Set();
   for (const file of files) {
     let data;
     try {
@@ -168,25 +254,29 @@ function scanCliSessions() {
     } catch {
       continue;
     }
-    const { pid, sessionId, cwd } = data;
+    const { pid, sessionId, cwd, name } = data;
     if (!pid || !sessionId) continue;
 
     const tabId = "cli-" + sessionId.slice(0, 8);
+    fileTabIds.add(tabId);
     if (dismissedIds.has(tabId)) continue;
 
     const alive = isPidAlive(pid);
-
-    // NOTE: we intentionally do NOT dedup by cwd — each unique sessionId
-    // represents a distinct Claude Code session, even if multiple are
-    // running in the same folder. Uniqueness comes from tabId only.
 
     if (sessions.has(tabId)) {
       // Already tracked — just refresh liveness
       const s = sessions.get(tabId);
       if (!alive && s.state !== "gone") s.state = "gone";
+      if (alive && isSessionJsonlStale(sessionId, cwd)) s.state = "gone";
+      if (alive) s.lastSeen = now;
+      if (name) s.sessionName = name;
+    } else if (isSessionJsonlStale(sessionId, cwd)) {
+      // Stale: don't create tile, but propagate /rename to active hook session
+      propagateNameToProjectSessions(sessionId, name);
     } else {
       sessions.set(tabId, {
         title: projectNameFromCwd(cwd),
+        sessionName: name || null,
         state: alive ? "idle" : "gone",
         url: cwd || null,
         source: "cli",
@@ -195,6 +285,17 @@ function scanCliSessions() {
         lastSeen: alive ? now : (data.startedAt || now),
         pid,
       });
+    }
+  }
+
+  // Expire ghost sessions: hook-created sessions with no session file
+  // that haven't received a hook event in 5 minutes.
+  const GHOST_TTL = 5 * 60 * 1000;
+  for (const [tabId, s] of sessions) {
+    if (!fileTabIds.has(tabId) && !dismissedIds.has(tabId)) {
+      if (now - s.lastSeen > GHOST_TTL && s.state !== "gone") {
+        s.state = "gone";
+      }
     }
   }
 }
@@ -509,11 +610,17 @@ async function handleUpdate(req, res) {
     return sendJSON(res, 400, { error: "bad json" });
   }
 
-  const { tabId, title, state, url, ts, detail, source } = body;
+  const { tabId, title, state, url, ts, detail, source, sessionName } = body;
   if (!tabId || !state) return sendJSON(res, 400, { error: "missing tabId or state" });
 
   // Hook update revives a dismissed session
   dismissedIds.delete(tabId);
+
+  // /rename from terminal: clear any dashboard customName so sessionName takes effect
+  if (sessionName !== undefined && config.customNames && config.customNames[tabId]) {
+    delete config.customNames[tabId];
+    saveConfig(config);
+  }
 
   const prev = sessions.get(tabId);
   const transitioning = !prev || prev.state !== state;
@@ -529,6 +636,7 @@ async function handleUpdate(req, res) {
   sessions.set(tabId, {
     ...(prev || {}),
     title: title || (prev && prev.title) || "Claude session",
+    sessionName: sessionName !== undefined ? sessionName : ((prev && prev.sessionName) || null),
     state,
     url: url || (prev && prev.url) || null,
     source: source || (prev && prev.source) || "cli",
@@ -649,7 +757,7 @@ function handleStatus(res) {
       tabId: id,
       ...s,
       project: s.title,
-      title: customName || s.title,
+      title: customName || s.sessionName || s.title,
       customName: customName || null,
       slug,
       firstPrompt,
@@ -932,7 +1040,7 @@ const server = http.createServer(async (req, res) => {
 
 // Start the session scanner so existing CLI sessions show up immediately.
 scanCliSessions();
-setInterval(scanCliSessions, 15000);
+setInterval(scanCliSessions, 2000);
 
 server.listen(PORT, HOST, () => {
   console.log(`claude_cli_alert running at http://${HOST}:${PORT}`);

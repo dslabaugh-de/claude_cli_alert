@@ -47,11 +47,11 @@ process.stdin.on("end", () => {
   let state;
   let detail = null;
 
-  // Intercept /exit and /clear early — these slash commands change the
-  // session lifecycle, and we want to reflect them immediately rather
-  // than waiting for a Stop or Notification hook.
+  // Intercept slash commands that change session lifecycle immediately
+  // rather than waiting for a Stop or Notification hook.
   if (event === "UserPromptSubmit" && prompt) {
     const lower = prompt.toLowerCase();
+
     // /exit and /quit end the session — remove the tile entirely
     if (lower === "/exit" || lower === "/quit") {
       const req = http.request({
@@ -67,36 +67,67 @@ process.stdin.on("end", () => {
       req.end();
       return;
     }
+
     // /clear resets context — force state back to idle
     if (lower === "/clear") {
       state = "idle";
       detail = "Context cleared";
     }
+
+    // /rename <name> — push the new name immediately instead of waiting for scanner
+    if (lower.startsWith("/rename ")) {
+      const newName = prompt.slice("/rename ".length).trim();
+      if (newName) {
+        const body = JSON.stringify({
+          tabId,
+          title: project,
+          state: "idle",
+          source: "cli",
+          detail: null,
+          url: cwd,
+          sessionName: newName,
+          ts: Date.now(),
+        });
+        const req = http.request({
+          hostname: HOST,
+          port: PORT,
+          path: "/update",
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+          timeout: 2000,
+        }, () => process.exit(0));
+        req.on("error", () => process.exit(0));
+        req.on("timeout", () => { req.destroy(); process.exit(0); });
+        req.write(body);
+        req.end();
+        return;
+      }
+    }
   }
 
   if (state === undefined) {
-  if (event === "Stop") {
-    state = "review";
-    detail = "Work complete";
-  } else if (event === "Notification") {
-    state = "waiting";
-    const labels = {
-      permission_prompt: "Permission needed",
-      idle_prompt: "Idle — waiting for input",
-      auth_success: "Auth complete",
-      elicitation_dialog: "Question for you",
-    };
-    const nt = payload.notification_type || "";
-    detail = labels[nt] || nt || "Notification";
-  } else if (event === "UserPromptSubmit") {
-    state = "running";
-  } else if (event === "PreToolUse") {
-    state = "running";
-    const tool = payload.tool_name || "";
-    detail = tool ? `Using ${tool}` : null;
-  } else {
-    state = "running";
-  }
+    if (event === "Stop") {
+      state = "review";
+      detail = "Work complete";
+    } else if (event === "Notification") {
+      state = "waiting";
+      const labels = {
+        permission_prompt: "Permission needed",
+        idle_prompt: "Idle — waiting for input",
+        auth_success: "Auth complete",
+        elicitation_dialog: "Question for you",
+      };
+      const nt = payload.notification_type || "";
+      detail = labels[nt] || nt || "Notification";
+    } else if (event === "UserPromptSubmit") {
+      state = "running";
+    } else if (event === "PreToolUse") {
+      state = "running";
+      const tool = payload.tool_name || "";
+      detail = tool ? `Using ${tool}` : null;
+    } else {
+      state = "running";
+    }
   }
 
   const body = JSON.stringify({

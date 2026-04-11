@@ -950,9 +950,46 @@
       </div>`;
   }
 
+  // ----- lifecycle flash (for /clear and /exit events) -----
+  let flashMsg = null;
+  let flashTimeout = null;
+  let prevSessionMap = null;
+
+  function setFlash(html, ms = 4000) {
+    if (flashTimeout) clearTimeout(flashTimeout);
+    flashMsg = html;
+    flashTimeout = setTimeout(() => { flashMsg = null; }, ms);
+  }
+
+  function detectLifecycleEvents(sessions) {
+    const curMap = new Map(sessions.map(s => [s.tabId, s]));
+    if (prevSessionMap !== null) {
+      for (const [tabId, prev] of prevSessionMap) {
+        const cur = curMap.get(tabId);
+        const name = `<span class="speech-session">${escapeHtml(prev.title)}</span>`;
+        // Session removed entirely → /exit
+        if (!cur) {
+          if (prev.state !== "gone") setFlash(`${name} ended — session closed`);
+          continue;
+        }
+        // detail flipped to "Context cleared" → /clear
+        if (cur.detail === "Context cleared" && prev.detail !== "Context cleared") {
+          setFlash(`${name} cleared context — back to idle`);
+        }
+        // sessionName changed → /rename
+        if (cur.sessionName && cur.sessionName !== prev.sessionName) {
+          const newName = `<span class="speech-session">${escapeHtml(cur.sessionName)}</span>`;
+          setFlash(`renamed to ${newName}`);
+        }
+      }
+    }
+    prevSessionMap = curMap;
+  }
+
   // ----- speech bubble -----
   function updateSpeech(sessions) {
     const el = document.getElementById("speech-text");
+    if (flashMsg) { el.innerHTML = flashMsg; return; }
     if (!sessions || sessions.length === 0) {
       el.innerHTML = `No sessions running yet. Start a Claude Code session and I'll watch it.`;
       return;
@@ -996,6 +1033,7 @@
       if (sessions.some(s => s.state === p)) { highest = p; break; }
     }
     document.body.className = "state-" + highest;
+    detectLifecycleEvents(sessions);
     updateSpeech(sessions);
 
     if (sessions.length === 0) {
@@ -1035,13 +1073,15 @@
 
       // Title fallback chain:
       //   1. customName (dashboard click-rename)
-      //   2. slug — Claude Code's internal session name
-      //      ("elegant-whistling-thunder"). If /rename updates this
-      //      field, the rename shows up here automatically.
-      //   3. cwd project name + auto #N if multiple share a folder
+      //   2. sessionName — set by /rename in Claude Code terminal
+      //   3. slug — Claude Code's internal session name
+      //      ("elegant-whistling-thunder")
+      //   4. cwd project name + auto #N if multiple share a folder
       let titleText;
       if (s.customName) {
         titleText = s.customName;
+      } else if (s.sessionName) {
+        titleText = s.sessionName;
       } else if (s.slug) {
         titleText = s.slug;
       } else {
