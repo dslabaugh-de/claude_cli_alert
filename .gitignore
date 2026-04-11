@@ -1,0 +1,15 @@
+# Imported buddies — only the bundled default ships with the repo
+buddy/*.txt
+!buddy/cinder.txt
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Local server state (shouldn't exist in-tree anyway)
+*.log
