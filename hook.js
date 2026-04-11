@@ -29,6 +29,8 @@ process.stdin.on("end", () => {
   const event = payload.hook_event_name || payload.event || "";
   const sessionId = payload.session_id || "unknown";
   const cwd = payload.cwd || "";
+  const prompt = (payload.prompt || "").trim();
+  const tabId = "cli-" + sessionId.slice(0, 8);
 
   // Project name = last meaningful folder of cwd. If the leaf is a common
   // subfolder (server, src, app, etc.) walk up one level for a better name.
@@ -45,6 +47,34 @@ process.stdin.on("end", () => {
   let state;
   let detail = null;
 
+  // Intercept /exit and /clear early — these slash commands change the
+  // session lifecycle, and we want to reflect them immediately rather
+  // than waiting for a Stop or Notification hook.
+  if (event === "UserPromptSubmit" && prompt) {
+    const lower = prompt.toLowerCase();
+    // /exit and /quit end the session — remove the tile entirely
+    if (lower === "/exit" || lower === "/quit") {
+      const req = http.request({
+        hostname: HOST,
+        port: PORT,
+        path: "/session/" + encodeURIComponent(tabId),
+        method: "DELETE",
+        headers: { "Content-Type": "application/json", "Content-Length": 0 },
+        timeout: 2000,
+      }, () => process.exit(0));
+      req.on("error", () => process.exit(0));
+      req.on("timeout", () => { req.destroy(); process.exit(0); });
+      req.end();
+      return;
+    }
+    // /clear resets context — force state back to idle
+    if (lower === "/clear") {
+      state = "idle";
+      detail = "Context cleared";
+    }
+  }
+
+  if (state === undefined) {
   if (event === "Stop") {
     state = "review";
     detail = "Work complete";
@@ -67,9 +97,10 @@ process.stdin.on("end", () => {
   } else {
     state = "running";
   }
+  }
 
   const body = JSON.stringify({
-    tabId: "cli-" + sessionId.slice(0, 8),
+    tabId,
     title: project,
     state,
     source: "cli",
