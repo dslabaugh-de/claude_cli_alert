@@ -1015,8 +1015,21 @@
       const stateClass = s.state;
       const stateLabel = STATE_LABELS[s.state] || s.state;
       const detail = s.detail ? escapeHtml(s.detail) : "";
-      let titleText = s.title || "Claude session";
-      if (!s.customName) {
+      const stats = sessionStats[s.tabId];
+
+      // Title fallback chain:
+      //   1. customName (user typed one in)
+      //   2. firstUserMessage — first real prompt you sent Claude
+      //   3. cwd project name + auto #N if multiple share a folder
+      let titleText;
+      if (s.customName) {
+        titleText = s.customName;
+      } else if (stats && stats.firstUserMessage) {
+        let firstLine = stats.firstUserMessage.split("\n")[0].trim();
+        if (firstLine.length > 60) firstLine = firstLine.slice(0, 57) + "…";
+        titleText = firstLine;
+      } else {
+        titleText = s.title || "Claude session";
         const key = s.project || s.title || "";
         if (projectCounts[key] > 1) {
           projectSeen[key] = (projectSeen[key] || 0) + 1;
@@ -1025,11 +1038,13 @@
       }
       const title = escapeHtml(titleText);
       const url = s.url ? escapeHtml(s.url) : "";
+      // Short project label: the project name from cwd (e.g. "claude_alert")
+      const projectName = s.project || (s.url ? s.url.split(/[/\\]/).filter(Boolean).pop() : "") || "";
+      const projectLabel = projectName ? escapeHtml("in " + projectName) : "";
       const tabId = escapeHtml(s.tabId);
       const flippedClass = flipped.has(s.tabId) ? "flipped" : "";
       const startedRel = s.ts ? relTime(s.ts) : "";
       const startedAbs = s.ts ? new Date(s.ts).toLocaleString() : "";
-      const stats = sessionStats[s.tabId];
       const userMsg = stats && stats.lastUserMessage ? escapeHtml(stats.lastUserMessage) : "";
       const aiMsg = stats && stats.lastAssistantMessage ? escapeHtml(stats.lastAssistantMessage) : "";
 
@@ -1049,7 +1064,7 @@
                 <span class="edit-icon" data-id="${tabId}" title="Rename">✎</span>
               </div>
               <div class="detail">${detail || "&nbsp;"}</div>
-              <div class="url">${url}</div>
+              <div class="url" title="${url}">${projectLabel}</div>
               <div class="started" title="${escapeHtml(startedAbs)}">started ${escapeHtml(startedRel)}</div>
               ${renderStats(s.tabId)}
             </div>

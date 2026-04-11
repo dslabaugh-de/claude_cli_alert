@@ -239,16 +239,32 @@ function sanitizeBuddyText(text) {
 }
 
 // ----- Face extraction from a buddy card -----
-// Handles a wide variety of ASCII art styles, not just Cinder's.
-// Strategies (first match wins):
-//   1. /\ /\ "ears" pattern bounded by a ` or ´ "chin" line
-//   2. A line containing paired eyes (e.g. "o o", "· ·", "^ ^") plus neighbors
-//   3. The first block of 2-7 consecutive short lines after any header
-//   4. null (dashboard falls back to a default face)
+// Uses the positional convention every card follows:
+//
+//   ╭────────────────────────╮
+//   │                        │
+//   │  RARITY            SIZE│   ← block 0: rating/type
+//   │                        │
+//   │   /\    /\             │   ← block 1: FACE
+//   │  ( ·    · )            │
+//   │  (   ..   )            │
+//   │   `------´             │
+//   │                        │
+//   │  Name                  │   ← block 2: name
+//   │                        │
+//   │  "Description..."      │   ← block 3: description
+//   │  ...                   │
+//   │                        │
+//   │  STAT1  ████░░  38     │   ← block 4+: stats / quote / etc
+//   ╰────────────────────────╯
+//
+// Blocks are just "contiguous non-empty lines separated by blank lines"
+// after stripping the card's outer border. The face is block index 1
+// (or block 0 if there's no rating line).
 
 function stripCardBorders(lines) {
-  // Drop the outermost border rows entirely (all box-drawing chars),
-  // then strip leading/trailing border chars from the remaining lines.
+  // Drop rows that are pure border (top/bottom edge), then strip
+  // leading/trailing vertical border chars from the remaining lines.
   return lines
     .filter((l) => !/^\s*[╭╮╰╯─━═┌┐└┘]+\s*$/.test(l))
     .map((l) =>
@@ -267,82 +283,37 @@ function dedent(lines) {
   return lines.map((l) => l.slice(minIndent));
 }
 
-function isLikelyBorder(line) {
-  const t = line.trim();
-  if (!t) return true;
-  return /^[─━═│║╭╮╯╰┌┐└┘┬┴├┤┼+=\-_*#~]+$/.test(t);
-}
-
-function isLikelyFaceLine(line) {
-  const t = line.trim();
-  if (!t) return false;
-  if (t.length > 32) return false;
-  // Face lines tend to have a low letter/total ratio
-  const letters = (t.match(/[a-zA-Z]/g) || []).length;
-  const ratio = letters / t.length;
-  return ratio < 0.35;
+function splitIntoBlocks(lines) {
+  const blocks = [];
+  let current = [];
+  for (const line of lines) {
+    if (line.trim()) {
+      current.push(line);
+    } else if (current.length) {
+      blocks.push(current);
+      current = [];
+    }
+  }
+  if (current.length) blocks.push(current);
+  return blocks;
 }
 
 function extractFace(content) {
-  const rawLines = content.split("\n");
-  const clean = stripCardBorders(rawLines);
+  const clean = stripCardBorders(content.split("\n"));
+  const blocks = splitIntoBlocks(clean);
+  if (blocks.length === 0) return null;
 
-  // Strategy 1: original /\ /\ ears pattern
-  let start = -1, end = -1;
-  for (let i = 0; i < clean.length; i++) {
-    if (/\/\\.*\/\\/.test(clean[i])) {
-      start = i;
-      for (let j = i + 1; j < Math.min(i + 8, clean.length); j++) {
-        if (/[`´'][^A-Za-z0-9]+[`´']/.test(clean[j])) {
-          end = j;
-          break;
-        }
-      }
-      break;
-    }
+  // Positional convention: block 0 = rating/type, block 1 = face.
+  // If block 0 is a single line (the rating row), the face is block 1.
+  // Otherwise block 0 IS the face (cards without a rating row).
+  let faceBlock;
+  if (blocks[0].length === 1 && blocks.length >= 2) {
+    faceBlock = blocks[1];
+  } else {
+    faceBlock = blocks[0];
   }
-  if (start >= 0 && end >= 0) {
-    return dedent(clean.slice(start, end + 1)).join("\n");
-  }
-
-  // Strategy 2: an "eyes" line — two identical small chars separated by
-  // spaces, optionally wrapped in parens/brackets.
-  const eyesRe = /[\(\[{]?\s*([o·\^O0*\-\~\.xX])\s{1,6}\1\s*[\)\]}]?/;
-  for (let i = 0; i < clean.length; i++) {
-    if (eyesRe.test(clean[i]) && !isLikelyBorder(clean[i])) {
-      // Grab up to 2 lines before and 3 after as the face block
-      const s = Math.max(0, i - 2);
-      const e = Math.min(clean.length - 1, i + 3);
-      // Trim empty lines at the edges
-      const block = clean.slice(s, e + 1);
-      while (block.length && !block[0].trim()) block.shift();
-      while (block.length && !block[block.length - 1].trim()) block.pop();
-      if (block.length >= 1 && block.length <= 7) {
-        return dedent(block).join("\n");
-      }
-    }
-  }
-
-  // Strategy 3: first contiguous run of 2-7 short face-ish lines
-  let blockStart = -1, blockEnd = -1;
-  for (let i = 0; i < clean.length; i++) {
-    const line = clean[i];
-    if (isLikelyFaceLine(line) && !isLikelyBorder(line)) {
-      if (blockStart < 0) blockStart = i;
-      blockEnd = i;
-    } else if (blockStart >= 0) {
-      // Hit a non-face line. Accept the block if it has enough lines.
-      if (blockEnd - blockStart + 1 >= 2) break;
-      blockStart = -1;
-      blockEnd = -1;
-    }
-  }
-  if (blockStart >= 0 && blockEnd - blockStart + 1 >= 2 && blockEnd - blockStart + 1 <= 7) {
-    return dedent(clean.slice(blockStart, blockEnd + 1)).join("\n");
-  }
-
-  // No recognizable face — let the client use its default
-  return null;
+  if (!faceBlock || faceBlock.length === 0) return null;
+  return dedent(faceBlock).join("\n");
 }
 
 function readBuddyCard() {
@@ -690,6 +661,7 @@ function getSessionStats(jsonlPath) {
     toolCalls: 0,
     totalInputTokens: 0,
     totalOutputTokens: 0,
+    firstUserMessage: null,
     lastUserMessage: null,
     lastAssistantMessage: null,
   };
@@ -703,15 +675,30 @@ function getSessionStats(jsonlPath) {
         if (d.type === "user") {
           stats.userMessages++;
           const content = (d.message || {}).content;
+          let text = null;
           if (typeof content === "string" && content.trim()) {
-            stats.lastUserMessage = content.slice(0, 500);
+            text = content;
           } else if (Array.isArray(content)) {
             for (const c of content) {
               if (c && c.type === "text" && c.text && c.text.trim()) {
-                stats.lastUserMessage = c.text.slice(0, 500);
+                text = c.text;
                 break;
               }
             }
+          }
+          // Skip tool-result / system-injected user turns — they start with
+          // "<bash-input>", "<system>", JSON, or are just whitespace junk.
+          // A real user prompt is a plain sentence.
+          const isRealPrompt =
+            text &&
+            !text.startsWith("<") &&
+            !text.startsWith("{") &&
+            !text.startsWith("[") &&
+            !/^Tool result:/i.test(text) &&
+            !/^Caveat:/i.test(text);
+          if (isRealPrompt) {
+            if (!stats.firstUserMessage) stats.firstUserMessage = text.slice(0, 500);
+            stats.lastUserMessage = text.slice(0, 500);
           }
         } else if (d.type === "assistant") {
           stats.assistantMessages++;
