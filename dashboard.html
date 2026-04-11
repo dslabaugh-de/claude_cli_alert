@@ -1034,17 +1034,16 @@
       const stats = sessionStats[s.tabId];
 
       // Title fallback chain:
-      //   1. customName (user typed one in the dashboard)
-      //   2. firstPrompt from ~/.claude/history.jsonl — the first real
-      //      prompt you typed in this session
+      //   1. customName (dashboard click-rename)
+      //   2. slug — Claude Code's internal session name
+      //      ("elegant-whistling-thunder"). If /rename updates this
+      //      field, the rename shows up here automatically.
       //   3. cwd project name + auto #N if multiple share a folder
       let titleText;
       if (s.customName) {
         titleText = s.customName;
-      } else if (s.firstPrompt) {
-        let firstLine = s.firstPrompt.split("\n")[0].trim();
-        if (firstLine.length > 60) firstLine = firstLine.slice(0, 57) + "…";
-        titleText = firstLine;
+      } else if (s.slug) {
+        titleText = s.slug;
       } else {
         titleText = s.title || "Claude session";
         const key = s.project || s.title || "";

@@ -602,6 +602,37 @@ function sessionIdForTabId(tabId) {
   return null;
 }
 
+// Read the session's "slug" — Claude Code's three-word auto-generated
+// session name (e.g. "elegant-whistling-thunder"). This is what Claude
+// Code uses as the internal session name and what /rename should update.
+// Cached per JSONL path with mtime invalidation.
+const slugCache = new Map(); // path -> { mtime, slug }
+function getSessionSlug(sessionId, cwd) {
+  const jsonlPath = findSessionJsonl(sessionId, cwd);
+  if (!jsonlPath) return null;
+  let stat;
+  try { stat = fs.statSync(jsonlPath); } catch { return null; }
+
+  const cached = slugCache.get(jsonlPath);
+  if (cached && cached.mtime === stat.mtimeMs) return cached.slug;
+
+  // Scan the JSONL looking for the LAST slug entry (so if /rename
+  // writes a new slug line, it wins over the auto-generated one).
+  let latestSlug = null;
+  try {
+    const content = fs.readFileSync(jsonlPath, "utf8");
+    for (const line of content.split("\n")) {
+      if (!line.includes('"slug"')) continue;
+      try {
+        const d = JSON.parse(line);
+        if (d.slug && typeof d.slug === "string") latestSlug = d.slug;
+      } catch {}
+    }
+  } catch {}
+  slugCache.set(jsonlPath, { mtime: stat.mtimeMs, slug: latestSlug });
+  return latestSlug;
+}
+
 function handleStatus(res) {
   const now = Date.now();
   for (const [, s] of sessions) {
@@ -612,6 +643,7 @@ function handleStatus(res) {
   const list = Array.from(sessions.entries()).map(([id, s]) => {
     const customName = config.customNames && config.customNames[id];
     const fullSessionId = sessionIdForTabId(id);
+    const slug = fullSessionId ? getSessionSlug(fullSessionId, s.url) : null;
     const firstPrompt = fullSessionId ? firstPromptForSession(fullSessionId) : null;
     return {
       tabId: id,
@@ -619,6 +651,7 @@ function handleStatus(res) {
       project: s.title,
       title: customName || s.title,
       customName: customName || null,
+      slug,
       firstPrompt,
       waitingSince: s.state === "waiting" ? Math.round((now - s.ts) / 1000) : null,
     };
