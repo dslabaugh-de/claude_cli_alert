@@ -66,6 +66,7 @@ function saveConfig(cfg) {
 
 let config = loadConfig();
 if (!config.alertSound) config.alertSound = platformDefaultSound();
+if (!config.customNames) config.customNames = {};
 
 function resolveAlertSoundPath() {
   if (config.alertSound === "mute") return null;
@@ -455,13 +456,40 @@ function handleStatus(res) {
       s.state = "gone";
     }
   }
-  const list = Array.from(sessions.entries()).map(([id, s]) => ({
-    tabId: id,
-    ...s,
-    waitingSince: s.state === "waiting" ? Math.round((now - s.ts) / 1000) : null,
-  }));
+  const list = Array.from(sessions.entries()).map(([id, s]) => {
+    const customName = config.customNames && config.customNames[id];
+    return {
+      tabId: id,
+      ...s,
+      // Preserve the cwd-derived project name as `project` so the UI can
+      // show it as a fallback/subtitle, and put the custom name (if any)
+      // into `title`.
+      project: s.title,
+      title: customName || s.title,
+      customName: customName || null,
+      waitingSince: s.state === "waiting" ? Math.round((now - s.ts) / 1000) : null,
+    };
+  });
   const anyWaiting = list.some((s) => s.state === "waiting");
   sendJSON(res, 200, { sessions: list, anyWaiting, checked: now });
+}
+
+async function handleRename(req, res, tabId) {
+  try {
+    const raw = await readBody(req, 4 * 1024);
+    const body = JSON.parse(raw);
+    const name = (body.name || "").toString().trim().slice(0, 60);
+    if (!config.customNames) config.customNames = {};
+    if (!name) {
+      delete config.customNames[tabId];
+    } else {
+      config.customNames[tabId] = name;
+    }
+    saveConfig(config);
+    return sendJSON(res, 200, { ok: true, tabId, name: name || null });
+  } catch (err) {
+    return sendJSON(res, 400, { error: "rename failed: " + err.message });
+  }
 }
 
 function handleDismiss(res, tabId) {
@@ -634,6 +662,10 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "DELETE" && url.startsWith("/session/")) {
     const tabId = decodeURIComponent(url.slice("/session/".length));
     return handleDismiss(res, tabId);
+  }
+  if (req.method === "POST" && url.startsWith("/session/") && url.endsWith("/rename")) {
+    const tabId = decodeURIComponent(url.slice("/session/".length, -"/rename".length));
+    return handleRename(req, res, tabId);
   }
   if (req.method === "GET" && url === "/buddy/card") {
     return handleBuddy(res);

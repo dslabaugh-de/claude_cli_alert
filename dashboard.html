@@ -471,6 +471,41 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    cursor: text;
+    border-radius: 4px;
+    padding: 2px 4px;
+    margin: -2px -4px;
+    transition: background 100ms ease;
+  }
+  .tile .title:hover {
+    background: rgba(0, 0, 0, 0.06);
+  }
+  .tile .title::after {
+    content: " ✎";
+    opacity: 0;
+    font-size: 11px;
+    color: var(--gray);
+    transition: opacity 150ms ease;
+  }
+  .tile .title:hover::after {
+    opacity: 0.6;
+  }
+  .tile .title-input {
+    font-size: 18px;
+    font-weight: 600;
+    width: 100%;
+    border: 1px solid var(--teal);
+    border-radius: 4px;
+    padding: 2px 6px;
+    margin: -3px -7px;
+    background: var(--white);
+    color: var(--charcoal);
+    font-family: inherit;
+    outline: none;
+  }
+  .tile .title-input:focus {
+    border-color: var(--teal-bright);
+    box-shadow: 0 0 0 2px rgba(0, 177, 172, 0.2);
   }
   .tile .detail {
     font-size: 13px;
@@ -824,24 +859,28 @@ After writing the file, describe the character you made in one sentence.</pre>
     const order = { waiting: 0, review: 1, running: 2, idle: 3, gone: 4 };
     sessions.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9));
 
-    // Count how many sessions share each URL so we can disambiguate tile
-    // titles when multiple sessions are running in the same folder.
-    const urlCounts = {};
+    // Count how many sessions share each project name so we can add an
+    // auto-number (#1, #2...) when the user hasn't set a custom name.
+    const projectCounts = {};
     for (const s of sessions) {
-      const key = s.url || "";
-      urlCounts[key] = (urlCounts[key] || 0) + 1;
+      const key = s.project || s.title || "";
+      projectCounts[key] = (projectCounts[key] || 0) + 1;
     }
+    const projectSeen = {};
 
     tiles.innerHTML = sessions.map(s => {
       const cls = ["tile", s.state].join(" ");
       const stateLabel = STATE_LABELS[s.state] || s.state;
       const detail = s.detail ? escapeHtml(s.detail) : "";
       let titleText = s.title || "Claude session";
-      // Append a short sessionId suffix when this folder has >1 session,
-      // so "claude #a1b2c3", "claude #d4e5f6" are distinguishable.
-      if (urlCounts[s.url || ""] > 1 && s.tabId) {
-        const shortId = s.tabId.replace(/^cli-/, "").slice(0, 6);
-        titleText += ` #${shortId}`;
+      // If the user hasn't named this one and multiple sessions share the
+      // project folder, append a stable auto-number based on creation ts.
+      if (!s.customName) {
+        const key = s.project || s.title || "";
+        if (projectCounts[key] > 1) {
+          projectSeen[key] = (projectSeen[key] || 0) + 1;
+          titleText += ` #${projectSeen[key]}`;
+        }
       }
       const title = escapeHtml(titleText);
       const url = s.url ? escapeHtml(s.url) : "";
@@ -851,7 +890,7 @@ After writing the file, describe the character you made in one sentence.</pre>
             <span class="state">${stateLabel}</span>
             <button class="dismiss" data-id="${escapeHtml(s.tabId)}" title="Dismiss">×</button>
           </div>
-          <div class="title">${title}</div>
+          <div class="title" data-id="${escapeHtml(s.tabId)}" title="Click to rename">${title}</div>
           <div class="detail">${detail || "&nbsp;"}</div>
           <div class="url">${url}</div>
           ${renderStats(s.tabId)}
@@ -864,6 +903,49 @@ After writing the file, describe the character you made in one sentence.</pre>
         await fetch("/session/" + encodeURIComponent(id), { method: "DELETE" });
         fetchStatus();
       });
+    });
+
+    // Click title to rename
+    tiles.querySelectorAll(".title").forEach(el => {
+      el.addEventListener("click", () => startRenaming(el));
+    });
+  }
+
+  function startRenaming(el) {
+    const id = el.getAttribute("data-id");
+    const currentText = el.textContent;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "title-input";
+    input.value = currentText;
+    input.maxLength = 60;
+    input.placeholder = "session name";
+    el.replaceWith(input);
+    input.focus();
+    input.select();
+
+    let done = false;
+    const commit = async (save) => {
+      if (done) return;
+      done = true;
+      if (save) {
+        const newName = input.value.trim();
+        try {
+          await fetch("/session/" + encodeURIComponent(id) + "/rename", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: newName }),
+          });
+        } catch {}
+      }
+      // Re-render on next status tick (or immediately)
+      fetchStatus();
+    };
+
+    input.addEventListener("blur", () => commit(true));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+      if (e.key === "Escape") { done = true; fetchStatus(); }
     });
   }
 
