@@ -113,7 +113,21 @@
     font-size: 12px;
     font-variant-numeric: tabular-nums;
     margin-top: 2px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
+  .sound-icon-btn {
+    background: transparent;
+    border: 0;
+    padding: 0 2px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    opacity: 0.5;
+    transition: opacity 150ms ease;
+  }
+  .sound-icon-btn:hover { opacity: 1; }
 
   /* ---------------- speech bubble ---------------- */
   .speech-bubble {
@@ -784,6 +798,17 @@
     margin-bottom: 8px;
   }
 
+  /* ---------------- poof animation ---------------- */
+  @keyframes tile-poof {
+    0%   { opacity: 1; transform: scale(1);    filter: blur(0px); }
+    25%  { opacity: 0.9; transform: scale(1.04); filter: blur(1px); }
+    100% { opacity: 0; transform: scale(0.75) translateY(-12px); filter: blur(8px); }
+  }
+  .tile.poof {
+    animation: tile-poof 0.65s cubic-bezier(0.4, 0, 1, 1) forwards;
+    pointer-events: none;
+  }
+
   /* ---------------- footer ---------------- */
   footer {
     text-align: center;
@@ -817,6 +842,7 @@
       <div class="meta">
         <span id="status-text">connecting…</span>
         <span id="last-check"></span>
+        <button class="sound-icon-btn" id="sound-btn" title="Choose alert sound">&#128264;</button>
       </div>
     </div>
     <div class="speech-bubble" id="speech">
@@ -858,8 +884,6 @@
     &copy; 2026 mattnalysis
     &nbsp;|&nbsp;
     locally hosted <span id="host-ip">127.0.0.1:3737</span>
-    &nbsp;|&nbsp;
-    <button class="test-btn" id="sound-btn">choose alert sound</button>
   </footer>
 
   <div class="sound-popover" id="sound-popover" hidden>
@@ -955,6 +979,9 @@
   let flashTimeout = null;
   let prevSessionMap = null;
 
+  // ----- poof tracking: tabId -> DOM element currently animating -----
+  const poofingTiles = new Map();
+
   function setFlash(html, ms = 4000) {
     if (flashTimeout) clearTimeout(flashTimeout);
     flashMsg = html;
@@ -972,9 +999,9 @@
           if (prev.state !== "gone") setFlash(`${name} ended — session closed`);
           continue;
         }
-        // detail flipped to "Context cleared" → /clear
-        if (cur.detail === "Context cleared" && prev.detail !== "Context cleared") {
-          setFlash(`${name} cleared context — back to idle`);
+        // state flipped to "poof" → /clear
+        if (cur.state === "poof" && prev.state !== "poof") {
+          setFlash(`${name} cleared context`);
         }
         // sessionName changed → /rename
         if (cur.sessionName && cur.sessionName !== prev.sessionName) {
@@ -996,7 +1023,7 @@
     }
     const waiting = sessions.filter(s => s.state === "waiting");
     const review  = sessions.filter(s => s.state === "review");
-    const running = sessions.filter(s => s.state === "running");
+    const running = sessions.filter(s => s.state === "running" && s.state !== "poof");
     if (waiting.length > 0) {
       const s = waiting[0];
       const extra = waiting.length > 1 ? ` (+${waiting.length - 1} more waiting)` : "";
@@ -1037,21 +1064,57 @@
     updateSpeech(sessions);
 
     if (sessions.length === 0) {
+      // Detach any still-animating poof tiles so they survive the innerHTML wipe.
+      for (const [, el] of poofingTiles) {
+        if (el.parentNode === tiles) el.remove();
+      }
       tiles.innerHTML = `
         <div class="empty">
           <div class="big">No active sessions yet</div>
           <div>Start a Claude Code session in your terminal — it'll appear here.</div>
         </div>`;
+      for (const [, el] of poofingTiles) {
+        tiles.appendChild(el);
+      }
       return;
     }
 
+    // Separate poof sessions — they animate independently and must not be
+    // wiped by the innerHTML rebuild on every poll cycle.
+    const poofSessions = sessions.filter(s => s.state === "poof");
+    const normalSessions = sessions.filter(s => s.state !== "poof");
+
+    // Kick off poof animations for any newly-poofed sessions.
+    for (const s of poofSessions) {
+      if (!poofingTiles.has(s.tabId)) {
+        const el = document.createElement("div");
+        el.className = "tile poof";
+        el.setAttribute("data-tab-id", s.tabId);
+        el.innerHTML = `<div class="tile-inner"><div class="tile-face front">
+          <div class="title-row"><span class="title">${escapeHtml(s.sessionName || s.slug || s.title || "Claude")}</span></div>
+          <div class="detail">Context cleared</div>
+        </div></div>`;
+        poofingTiles.set(s.tabId, el);
+        el.addEventListener("animationend", () => {
+          poofingTiles.delete(s.tabId);
+          el.remove();
+        });
+        tiles.appendChild(el);
+      }
+    }
+
+    // Detach live poof elements before wiping innerHTML so their animations survive.
+    for (const [, el] of poofingTiles) {
+      if (el.parentNode === tiles) el.remove();
+    }
+
     const order = { waiting: 0, review: 1, running: 2, idle: 3, gone: 4 };
-    sessions.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9));
+    normalSessions.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9));
 
     // Count how many sessions share each project name so we can add an
     // auto-number (#1, #2...) when the user hasn't set a custom name.
     const projectCounts = {};
-    for (const s of sessions) {
+    for (const s of normalSessions) {
       const key = s.project || s.title || "";
       projectCounts[key] = (projectCounts[key] || 0) + 1;
     }
@@ -1065,7 +1128,7 @@
       if (id) flipped.add(id);
     });
 
-    tiles.innerHTML = sessions.map(s => {
+    tiles.innerHTML = normalSessions.map(s => {
       const stateClass = s.state;
       const stateLabel = STATE_LABELS[s.state] || s.state;
       const detail = s.detail ? escapeHtml(s.detail) : "";
@@ -1142,6 +1205,11 @@
           </div>
         </div>`;
     }).join("");
+
+    // Re-attach any poof tiles that survived the innerHTML rebuild.
+    for (const [, el] of poofingTiles) {
+      tiles.appendChild(el);
+    }
 
     // Wire up actions
     tiles.querySelectorAll(".dismiss").forEach(btn => {

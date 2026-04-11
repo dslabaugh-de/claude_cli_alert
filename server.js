@@ -650,6 +650,14 @@ async function handleUpdate(req, res) {
     playAlert();
   }
 
+  // Poof: auto-dismiss the old session after the animation has played
+  if (transitioning && state === "poof") {
+    setTimeout(() => {
+      sessions.delete(tabId);
+      dismissedIds.add(tabId);
+    }, 2500);
+  }
+
   sendJSON(res, 200, { ok: true });
 }
 

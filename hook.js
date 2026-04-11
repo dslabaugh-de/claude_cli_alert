@@ -68,9 +68,9 @@ process.stdin.on("end", () => {
       return;
     }
 
-    // /clear resets context — force state back to idle
+    // /clear resets context — poof the old tile off the dashboard
     if (lower === "/clear") {
-      state = "idle";
+      state = "poof";
       detail = "Context cleared";
     }
 
