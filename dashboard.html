@@ -824,11 +824,26 @@ After writing the file, describe the character you made in one sentence.</pre>
     const order = { waiting: 0, review: 1, running: 2, idle: 3, gone: 4 };
     sessions.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9));
 
+    // Count how many sessions share each URL so we can disambiguate tile
+    // titles when multiple sessions are running in the same folder.
+    const urlCounts = {};
+    for (const s of sessions) {
+      const key = s.url || "";
+      urlCounts[key] = (urlCounts[key] || 0) + 1;
+    }
+
     tiles.innerHTML = sessions.map(s => {
       const cls = ["tile", s.state].join(" ");
       const stateLabel = STATE_LABELS[s.state] || s.state;
       const detail = s.detail ? escapeHtml(s.detail) : "";
-      const title = escapeHtml(s.title || "Claude session");
+      let titleText = s.title || "Claude session";
+      // Append a short sessionId suffix when this folder has >1 session,
+      // so "claude #a1b2c3", "claude #d4e5f6" are distinguishable.
+      if (urlCounts[s.url || ""] > 1 && s.tabId) {
+        const shortId = s.tabId.replace(/^cli-/, "").slice(0, 6);
+        titleText += ` #${shortId}`;
+      }
+      const title = escapeHtml(titleText);
       const url = s.url ? escapeHtml(s.url) : "";
       return `
         <div class="${cls}">

@@ -168,23 +168,9 @@ function scanCliSessions() {
 
     const alive = isPidAlive(pid);
 
-    // If a different tabId already tracks the same cwd, drop the stale one.
-    // Hook-driven entries are authoritative — if one exists and is fresher,
-    // skip this scanned entry.
-    if (cwd) {
-      let dominated = false;
-      for (const [id, s] of sessions) {
-        if (id !== tabId && s.url === cwd) {
-          if (s.lastSeen > (data.startedAt || 0) && s.state !== "gone") {
-            dominated = true;
-          } else {
-            sessions.delete(id);
-          }
-          break;
-        }
-      }
-      if (dominated) continue;
-    }
+    // NOTE: we intentionally do NOT dedup by cwd — each unique sessionId
+    // represents a distinct Claude Code session, even if multiple are
+    // running in the same folder. Uniqueness comes from tabId only.
 
     if (sessions.has(tabId)) {
       // Already tracked — just refresh liveness
@@ -439,12 +425,10 @@ async function handleUpdate(req, res) {
   const prev = sessions.get(tabId);
   const transitioning = !prev || prev.state !== state;
 
-  // If a different tabId already has the same cwd, drop the stale one
-  if (url) {
-    for (const [id, s] of sessions) {
-      if (id !== tabId && s.url === url) sessions.delete(id);
-    }
-  }
+  // NOTE: previously we removed any other entries sharing this URL on the
+  // assumption they were stale. That collapsed legitimate concurrent
+  // sessions in the same folder into one tile. Each tabId is unique per
+  // Claude session, so we trust it.
 
   sessions.set(tabId, {
     title: title || "Claude session",
