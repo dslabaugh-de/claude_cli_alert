@@ -1034,14 +1034,15 @@
       const stats = sessionStats[s.tabId];
 
       // Title fallback chain:
-      //   1. customName (user typed one in)
-      //   2. firstUserMessage — first real prompt you sent Claude
+      //   1. customName (user typed one in the dashboard)
+      //   2. firstPrompt from ~/.claude/history.jsonl — the first real
+      //      prompt you typed in this session
       //   3. cwd project name + auto #N if multiple share a folder
       let titleText;
       if (s.customName) {
         titleText = s.customName;
-      } else if (stats && stats.firstUserMessage) {
-        let firstLine = stats.firstUserMessage.split("\n")[0].trim();
+      } else if (s.firstPrompt) {
+        let firstLine = s.firstPrompt.split("\n")[0].trim();
         if (firstLine.length > 60) firstLine = firstLine.slice(0, 57) + "…";
         titleText = firstLine;
       } else {
@@ -1054,9 +1055,6 @@
       }
       const title = escapeHtml(titleText);
       const url = s.url ? escapeHtml(s.url) : "";
-      // Short project label: the project name from cwd (e.g. "claude_alert")
-      const projectName = s.project || (s.url ? s.url.split(/[/\\]/).filter(Boolean).pop() : "") || "";
-      const projectLabel = projectName ? escapeHtml("in " + projectName) : "";
       const tabId = escapeHtml(s.tabId);
       const flippedClass = flipped.has(s.tabId) ? "flipped" : "";
       const startedRel = s.ts ? relTime(s.ts) : "";
@@ -1079,7 +1077,7 @@
                 <span class="title" data-id="${tabId}" title="Click to rename (or use /rename in Claude Code)">${title}</span>
               </div>
               <div class="detail">${detail || "&nbsp;"}</div>
-              <div class="url" title="${url}">${projectLabel}</div>
+              <div class="url" title="${url}">${url}</div>
               <div class="started" title="${escapeHtml(startedAbs)}">started ${escapeHtml(startedRel)}</div>
               ${renderStats(s.tabId)}
             </div>

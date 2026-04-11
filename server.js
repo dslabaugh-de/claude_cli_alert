@@ -92,6 +92,7 @@ const GONE_AFTER_MS = 4 * 60 * 60 * 1000; // 4 hours
 const CLAUDE_HOME = path.join(os.homedir(), ".claude");
 const CLAUDE_SESSIONS_DIR = path.join(CLAUDE_HOME, "sessions");
 const CLAUDE_PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
+const CLAUDE_HISTORY_FILE = path.join(CLAUDE_HOME, "history.jsonl");
 
 // Context window sizes by model family
 const CONTEXT_WINDOWS = {
@@ -544,6 +545,63 @@ async function handleUpdate(req, res) {
   sendJSON(res, 200, { ok: true });
 }
 
+// ---------------------------------------------------------------------------
+// First-prompt cache — reads ~/.claude/history.jsonl and maps each
+// sessionId to the first `display` entry (the first user prompt typed in
+// that session). Re-read when the file's mtime changes.
+// ---------------------------------------------------------------------------
+let historyCache = { mtime: 0, byId: new Map() };
+
+function refreshHistoryCache() {
+  let stat;
+  try {
+    stat = fs.statSync(CLAUDE_HISTORY_FILE);
+  } catch {
+    return;
+  }
+  if (stat.mtimeMs === historyCache.mtime) return;
+  const byId = new Map();
+  try {
+    const raw = fs.readFileSync(CLAUDE_HISTORY_FILE, "utf8");
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      let d;
+      try { d = JSON.parse(line); } catch { continue; }
+      if (!d.sessionId || !d.display) continue;
+      const text = String(d.display).trim();
+      if (!text) continue;
+      // Skip slash commands and obvious system-injected prompts
+      if (text.startsWith("<") || text.startsWith("/")) continue;
+      // First-wins: only set if we haven't seen this sessionId yet
+      if (!byId.has(d.sessionId)) byId.set(d.sessionId, text);
+    }
+  } catch {
+    return;
+  }
+  historyCache = { mtime: stat.mtimeMs, byId };
+}
+
+function firstPromptForSession(sessionId) {
+  refreshHistoryCache();
+  return historyCache.byId.get(sessionId) || null;
+}
+
+// Get the full sessionId (UUID) for a tabId from the scanned data
+function sessionIdForTabId(tabId) {
+  if (!tabId || !tabId.startsWith("cli-")) return null;
+  const prefix = tabId.slice(4);
+  try {
+    for (const file of fs.readdirSync(CLAUDE_SESSIONS_DIR)) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const data = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, file), "utf8"));
+        if (data.sessionId && data.sessionId.startsWith(prefix)) return data.sessionId;
+      } catch {}
+    }
+  } catch {}
+  return null;
+}
+
 function handleStatus(res) {
   const now = Date.now();
   for (const [, s] of sessions) {
@@ -553,15 +611,15 @@ function handleStatus(res) {
   }
   const list = Array.from(sessions.entries()).map(([id, s]) => {
     const customName = config.customNames && config.customNames[id];
+    const fullSessionId = sessionIdForTabId(id);
+    const firstPrompt = fullSessionId ? firstPromptForSession(fullSessionId) : null;
     return {
       tabId: id,
       ...s,
-      // Preserve the cwd-derived project name as `project` so the UI can
-      // show it as a fallback/subtitle, and put the custom name (if any)
-      // into `title`.
       project: s.title,
       title: customName || s.title,
       customName: customName || null,
+      firstPrompt,
       waitingSince: s.state === "waiting" ? Math.round((now - s.ts) / 1000) : null,
     };
   });
