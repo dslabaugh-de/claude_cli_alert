@@ -407,13 +407,33 @@
     letter-spacing: 0.08em;
   }
 
-  /* ---------------- session tiles ---------------- */
+  /* ---------------- session tiles (flippable) ---------------- */
   .tiles {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 14px;
   }
+  /* Outer wrapper = perspective container, no visual styling */
   .tile {
+    perspective: 1400px;
+    min-height: 220px;
+  }
+  .tile-inner {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 220px;
+    transform-style: preserve-3d;
+    transition: transform 0.55s cubic-bezier(0.25, 0.8, 0.3, 1);
+  }
+  .tile.flipped .tile-inner {
+    transform: rotateY(180deg);
+  }
+  .tile-face {
+    position: absolute;
+    inset: 0;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
     background: var(--gray-soft);
     border: 2px solid var(--gray-border);
     border-radius: 12px;
@@ -423,17 +443,27 @@
     flex-direction: column;
     gap: 6px;
     overflow: hidden;
-    transition: transform 120ms ease, box-shadow 120ms ease;
+    transition: box-shadow 120ms ease;
   }
-  .tile:hover {
-    transform: translateY(-1px);
+  .tile-face.back {
+    transform: rotateY(180deg);
+    background: var(--white);
+    border-color: var(--teal);
+  }
+  .tile:hover .tile-face {
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
   }
+
   .tile-top {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+  }
+  .tile-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
   }
   .tile .state {
     font-size: 11px;
@@ -442,28 +472,39 @@
     letter-spacing: 0.08em;
     color: var(--gray);
   }
-  .tile.running {
+
+  /* Running = light teal accent */
+  .tile.running .tile-face.front {
     background: var(--teal-bg);
     border-color: var(--teal);
   }
-  .tile.running .state { color: var(--teal); }
-  .tile.running:hover {
+  .tile.running .tile-face.front .state { color: var(--teal); }
+  .tile.running:hover .tile-face {
     box-shadow: 0 6px 20px rgba(0, 128, 123, 0.15);
   }
-  .tile .dismiss {
+  .tile .dismiss,
+  .tile .flip-btn {
     flex-shrink: 0;
     background: transparent;
     border: 0;
     color: var(--gray);
-    font-size: 18px;
+    font-size: 15px;
     cursor: pointer;
-    padding: 2px 8px;
+    padding: 2px 6px;
     border-radius: 6px;
     line-height: 1;
   }
-  .tile .dismiss:hover {
+  .tile .dismiss { font-size: 18px; }
+  .tile .dismiss:hover,
+  .tile .flip-btn:hover {
     background: rgba(0, 0, 0, 0.08);
     color: var(--charcoal);
+  }
+  .tile .title-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
   }
   .tile .title {
     font-size: 18px;
@@ -476,19 +517,26 @@
     padding: 2px 4px;
     margin: -2px -4px;
     transition: background 100ms ease;
+    flex: 1;
+    min-width: 0;
   }
   .tile .title:hover {
     background: rgba(0, 0, 0, 0.06);
   }
-  .tile .title::after {
-    content: " ✎";
-    opacity: 0;
-    font-size: 11px;
+  .tile .edit-icon {
+    flex-shrink: 0;
+    font-size: 13px;
     color: var(--gray);
-    transition: opacity 150ms ease;
+    opacity: 0.55;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: opacity 150ms ease, background 100ms ease;
+    user-select: none;
   }
-  .tile .title:hover::after {
-    opacity: 0.6;
+  .tile .edit-icon:hover {
+    opacity: 1;
+    background: rgba(0, 0, 0, 0.08);
   }
   .tile .title-input {
     font-size: 18px;
@@ -506,6 +554,12 @@
   .tile .title-input:focus {
     border-color: var(--teal-bright);
     box-shadow: 0 0 0 2px rgba(0, 177, 172, 0.2);
+  }
+  .tile .started {
+    font-size: 10px;
+    color: var(--gray);
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
   }
   .tile .detail {
     font-size: 13px;
@@ -576,31 +630,89 @@
     font-size: 10px;
   }
 
-  /* state variants */
-  .tile.waiting {
+  /* state variants — applied to the front face */
+  .tile.waiting .tile-face.front {
     background: var(--yellow);
     border-color: var(--gold);
     color: var(--charcoal);
   }
-  .tile.waiting .state { color: #6b4e00; }
-  .tile.waiting .detail, .tile.waiting .url { color: var(--charcoal); }
-  .tile.review {
+  .tile.waiting .tile-face.front .state { color: #6b4e00; }
+  .tile.waiting .tile-face.front .detail,
+  .tile.waiting .tile-face.front .url,
+  .tile.waiting .tile-face.front .started { color: var(--charcoal); }
+
+  .tile.review .tile-face.front {
     background: var(--teal-bright);
     border-color: var(--teal);
     color: var(--white);
   }
-  .tile.review .state,
-  .tile.review .detail,
-  .tile.review .url { color: var(--white); opacity: 0.95; }
-  .tile.gone {
+  .tile.review .tile-face.front .state,
+  .tile.review .tile-face.front .detail,
+  .tile.review .tile-face.front .url,
+  .tile.review .tile-face.front .started { color: var(--white); opacity: 0.95; }
+  .tile.review .tile-face.front .edit-icon,
+  .tile.review .tile-face.front .flip-btn,
+  .tile.review .tile-face.front .dismiss { color: var(--white); }
+
+  .tile.gone .tile-face.front {
     background: var(--gray-soft);
     border-color: var(--gray);
     color: var(--gray);
     opacity: 0.7;
   }
-  .tile.gone .state,
-  .tile.gone .detail,
-  .tile.gone .url { color: var(--gray); }
+  .tile.gone .tile-face.front .state,
+  .tile.gone .tile-face.front .detail,
+  .tile.gone .tile-face.front .url,
+  .tile.gone .tile-face.front .started { color: var(--gray); }
+
+  /* ---- back face: last messages ---- */
+  .tile-face.back {
+    gap: 4px;
+    overflow-y: auto;
+  }
+  .tile-face.back::-webkit-scrollbar { width: 6px; }
+  .tile-face.back::-webkit-scrollbar-thumb {
+    background: var(--teal);
+    border-radius: 3px;
+  }
+  .tile-face.back .state { color: var(--teal); }
+  .msg-block {
+    border-left: 3px solid var(--teal);
+    padding: 6px 10px;
+    background: var(--teal-bg);
+    border-radius: 4px;
+    margin-top: 6px;
+  }
+  .msg-block.user {
+    border-left-color: var(--gold);
+    background: #fff8e6;
+  }
+  .msg-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--gray);
+    margin-bottom: 3px;
+  }
+  .msg-block.user .msg-label { color: #8b6a00; }
+  .msg-block:not(.user) .msg-label { color: var(--teal); }
+  .msg-text {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--charcoal);
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    max-height: 130px;
+    overflow: hidden;
+  }
+  .msg-empty {
+    font-size: 12px;
+    color: var(--gray);
+    font-style: italic;
+    text-align: center;
+    padding: 20px;
+  }
 
   /* empty state */
   .empty {
@@ -662,27 +774,8 @@
 
     <div class="import-panel" id="import-panel" hidden>
       <h3>Import a buddy</h3>
-      <p>Drop a <code>.txt</code> into <code>~/.claude-alert/buddy/</code>, paste one below, or have Claude Code create one for you. Stars, emoji, and tabs get stripped automatically on import so the monospace grid stays clean.</p>
-
-      <details>
-        <summary>Have Claude Code create one for you</summary>
-        <p style="margin-top:10px">Open a Claude Code session, paste this prompt, and hit enter. Claude will write the file directly:</p>
-        <pre class="claude-prompt" id="claude-prompt">Create a buddy card for my Claude CLI alert dashboard and save it to ~/.claude-alert/buddy/mybuddy.txt. Requirements:
-- Pure ASCII inside a monospace box (use ╭ ╮ ╰ ╯ ─ │ for borders).
-- About 40 characters wide including borders.
-- A small ASCII face (4-8 lines) near the top.
-- A name, a one-sentence quoted description, and 4-5 stat bars using ████░░░░ style.
-- Pick an original character and stats you think would be fun.
-- Do NOT use stars (★ ☆), sparkles (✨), emoji, or any non-monospace characters.
-- Do NOT use tabs; indent with spaces only.
-
-After writing the file, describe the character you made in one sentence.</pre>
-        <button class="copy-btn" id="copy-prompt">Copy prompt</button>
-      </details>
-
-      <p style="margin-top:4px">Or paste your own buddy card:</p>
-      <input type="text" id="buddy-name-input" placeholder="buddy name (e.g. whiskers)" value="custom" />
-      <textarea id="buddy-paste" placeholder="Paste your buddy card text here..." rows="10"></textarea>
+      <p>Paste your buddy card below and hit save. Stars, emoji, and tabs are stripped automatically.</p>
+      <textarea id="buddy-paste" placeholder="Paste your buddy card text here..." rows="12"></textarea>
       <div class="import-buttons">
         <button class="cancel" id="cancel-import">Cancel</button>
         <button class="save" id="save-buddy">Save buddy</button>
@@ -868,13 +961,19 @@ After writing the file, describe the character you made in one sentence.</pre>
     }
     const projectSeen = {};
 
+    // Preserve which tiles are currently flipped so re-rendering (every 2s)
+    // doesn't flip them back. Keyed by tabId.
+    const flipped = new Set();
+    tiles.querySelectorAll(".tile.flipped").forEach(el => {
+      const id = el.getAttribute("data-tab-id");
+      if (id) flipped.add(id);
+    });
+
     tiles.innerHTML = sessions.map(s => {
-      const cls = ["tile", s.state].join(" ");
+      const stateClass = s.state;
       const stateLabel = STATE_LABELS[s.state] || s.state;
       const detail = s.detail ? escapeHtml(s.detail) : "";
       let titleText = s.title || "Claude session";
-      // If the user hasn't named this one and multiple sessions share the
-      // project folder, append a stable auto-number based on creation ts.
       if (!s.customName) {
         const key = s.project || s.title || "";
         if (projectCounts[key] > 1) {
@@ -884,31 +983,100 @@ After writing the file, describe the character you made in one sentence.</pre>
       }
       const title = escapeHtml(titleText);
       const url = s.url ? escapeHtml(s.url) : "";
+      const tabId = escapeHtml(s.tabId);
+      const flippedClass = flipped.has(s.tabId) ? "flipped" : "";
+      const startedRel = s.ts ? relTime(s.ts) : "";
+      const startedAbs = s.ts ? new Date(s.ts).toLocaleString() : "";
+      const stats = sessionStats[s.tabId];
+      const userMsg = stats && stats.lastUserMessage ? escapeHtml(stats.lastUserMessage) : "";
+      const aiMsg = stats && stats.lastAssistantMessage ? escapeHtml(stats.lastAssistantMessage) : "";
+
       return `
-        <div class="${cls}">
-          <div class="tile-top">
-            <span class="state">${stateLabel}</span>
-            <button class="dismiss" data-id="${escapeHtml(s.tabId)}" title="Dismiss">×</button>
+        <div class="tile ${stateClass} ${flippedClass}" data-tab-id="${tabId}">
+          <div class="tile-inner">
+            <div class="tile-face front">
+              <div class="tile-top">
+                <span class="state">${stateLabel}</span>
+                <div class="tile-actions">
+                  <button class="flip-btn" data-id="${tabId}" title="Show last messages">&#x21BA;</button>
+                  <button class="dismiss" data-id="${tabId}" title="Dismiss">×</button>
+                </div>
+              </div>
+              <div class="title-row">
+                <span class="title" data-id="${tabId}" title="Click to rename">${title}</span>
+                <span class="edit-icon" data-id="${tabId}" title="Rename">✎</span>
+              </div>
+              <div class="detail">${detail || "&nbsp;"}</div>
+              <div class="url">${url}</div>
+              <div class="started" title="${escapeHtml(startedAbs)}">started ${escapeHtml(startedRel)}</div>
+              ${renderStats(s.tabId)}
+            </div>
+            <div class="tile-face back">
+              <div class="tile-top">
+                <span class="state">Last messages</span>
+                <div class="tile-actions">
+                  <button class="flip-btn" data-id="${tabId}" title="Back to session info">&#x21BA;</button>
+                </div>
+              </div>
+              ${userMsg ? `
+                <div class="msg-block user">
+                  <div class="msg-label">You</div>
+                  <div class="msg-text">${userMsg}</div>
+                </div>` : ""}
+              ${aiMsg ? `
+                <div class="msg-block">
+                  <div class="msg-label">Claude</div>
+                  <div class="msg-text">${aiMsg}</div>
+                </div>` : ""}
+              ${(!userMsg && !aiMsg) ? `<div class="msg-empty">No message history yet.</div>` : ""}
+            </div>
           </div>
-          <div class="title" data-id="${escapeHtml(s.tabId)}" title="Click to rename">${title}</div>
-          <div class="detail">${detail || "&nbsp;"}</div>
-          <div class="url">${url}</div>
-          ${renderStats(s.tabId)}
         </div>`;
     }).join("");
 
+    // Wire up actions
     tiles.querySelectorAll(".dismiss").forEach(btn => {
-      btn.addEventListener("click", async () => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
         const id = btn.getAttribute("data-id");
         await fetch("/session/" + encodeURIComponent(id), { method: "DELETE" });
         fetchStatus();
       });
     });
 
-    // Click title to rename
-    tiles.querySelectorAll(".title").forEach(el => {
-      el.addEventListener("click", () => startRenaming(el));
+    tiles.querySelectorAll(".flip-btn").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = btn.getAttribute("data-id");
+        const tileEl = tiles.querySelector(`.tile[data-tab-id="${id}"]`);
+        if (tileEl) tileEl.classList.toggle("flipped");
+      });
     });
+
+    // Click title or pencil to rename
+    tiles.querySelectorAll(".title").forEach(el => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        startRenaming(el);
+      });
+    });
+    tiles.querySelectorAll(".edit-icon").forEach(el => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = el.getAttribute("data-id");
+        const titleEl = tiles.querySelector(`.title[data-id="${id}"]`);
+        if (titleEl) startRenaming(titleEl);
+      });
+    });
+  }
+
+  // Relative time formatter: "just now", "5 min ago", "2h ago", "3d ago"
+  function relTime(ts) {
+    const diff = Date.now() - ts;
+    if (diff < 60_000) return "just now";
+    if (diff < 3_600_000) return Math.round(diff / 60_000) + " min ago";
+    if (diff < 86_400_000) return Math.round(diff / 3_600_000) + "h ago";
+    return Math.round(diff / 86_400_000) + "d ago";
   }
 
   function startRenaming(el) {
@@ -989,21 +1157,7 @@ After writing the file, describe the character you made in one sentence.</pre>
     document.getElementById("import-status").textContent = "";
   });
 
-  document.getElementById("copy-prompt").addEventListener("click", async () => {
-    const text = document.getElementById("claude-prompt").textContent;
-    const btn = document.getElementById("copy-prompt");
-    try {
-      await navigator.clipboard.writeText(text);
-      btn.textContent = "Copied!";
-      setTimeout(() => { btn.textContent = "Copy prompt"; }, 1800);
-    } catch {
-      btn.textContent = "Select it manually";
-      setTimeout(() => { btn.textContent = "Copy prompt"; }, 1800);
-    }
-  });
-
   document.getElementById("save-buddy").addEventListener("click", async () => {
-    const name = document.getElementById("buddy-name-input").value.trim() || "custom";
     const content = document.getElementById("buddy-paste").value;
     const status = document.getElementById("import-status");
     if (!content.trim()) {
@@ -1015,11 +1169,11 @@ After writing the file, describe the character you made in one sentence.</pre>
       const r = await fetch("/buddy/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, content }),
+        body: JSON.stringify({ content }),
       });
       const data = await r.json();
       if (data.ok) {
-        status.textContent = "Saved as " + data.name + ".txt — refreshing…";
+        status.textContent = "Saved — refreshing…";
         status.className = "import-status";
         await fetchBuddy();
         setTimeout(() => {

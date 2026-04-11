@@ -18,7 +18,13 @@ const { spawn, exec, execSync } = require("child_process");
 const PORT = 3737;
 const HOST = "127.0.0.1";
 const ROOT = __dirname;
+// Buddy dir lives next to server.js. Whether that's ~/.claude-alert/ (after
+// install.command) or a cloned repo, it works the same way.
 const BUDDY_DIR = path.join(ROOT, "buddy");
+
+// Make sure the buddy dir exists at startup so imports always have
+// somewhere to land, even on a barebones install.
+try { fs.mkdirSync(BUDDY_DIR, { recursive: true }); } catch {}
 
 // Alert sound is platform-aware. On Mac we use /System/Library/Sounds/*.aiff
 // via afplay. On Windows we use C:\Windows\Media\*.wav via PowerShell's
@@ -292,33 +298,55 @@ async function handleBuddyImport(req, res) {
   try {
     const raw = await readBody(req, 64 * 1024);
     const body = JSON.parse(raw);
-    let { name, content } = body;
-    if (!content || typeof content !== "string") {
-      return sendJSON(res, 400, { error: "missing content" });
+    const content = body && body.content;
+    if (!content || typeof content !== "string" || !content.trim()) {
+      return sendJSON(res, 400, { error: "missing or empty content" });
     }
-    name = (name || "custom").toString();
-    const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40) || "custom";
     const clean = sanitizeBuddyText(content);
 
-    // Make sure the buddy dir exists (belt + suspenders — install.command
-    // should already have created it, but if someone runs from a fresh
-    // clone without install, fall back gracefully).
-    try {
-      fs.mkdirSync(BUDDY_DIR, { recursive: true });
-    } catch {}
+    // Try a series of dirs in priority order so the save ALWAYS lands
+    // somewhere the server will read back. The first writable one wins.
+    const candidates = [
+      BUDDY_DIR,
+      path.join(os.homedir(), ".claude-alert", "buddy"),
+      path.join(os.homedir(), ".claude-alert-buddy"),
+    ];
 
-    const filepath = path.join(BUDDY_DIR, safeName + ".txt");
-    try {
-      fs.writeFileSync(filepath, clean, "utf8");
-    } catch (err) {
-      console.log("[import] write failed:", err.code, err.message, "path:", filepath);
+    let lastErr = null;
+    let writtenTo = null;
+    const filename = "imported.txt";
+    for (const dir of candidates) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        const filepath = path.join(dir, filename);
+        fs.writeFileSync(filepath, clean, "utf8");
+        writtenTo = filepath;
+        break;
+      } catch (err) {
+        lastErr = err;
+        console.log("[import] candidate failed:", dir, "-", err.code || "?", err.message);
+      }
+    }
+
+    if (!writtenTo) {
       return sendJSON(res, 500, {
-        error: `write failed (${err.code || "unknown"}): ${err.message}`,
-        path: filepath,
+        error: `all candidate dirs failed. last: ${lastErr ? lastErr.code + " " + lastErr.message : "unknown"}`,
+        tried: candidates,
       });
     }
-    console.log("[import] wrote", filepath, `(${clean.length} chars)`);
-    return sendJSON(res, 200, { ok: true, name: safeName, path: filepath });
+
+    // If we wrote outside the canonical BUDDY_DIR, also copy there so
+    // readBuddyCard picks it up. This handles the case where server.js is
+    // running out of a clone and BUDDY_DIR differs from where we saved.
+    if (writtenTo !== path.join(BUDDY_DIR, filename)) {
+      try {
+        fs.mkdirSync(BUDDY_DIR, { recursive: true });
+        fs.writeFileSync(path.join(BUDDY_DIR, filename), clean, "utf8");
+      } catch {}
+    }
+
+    console.log("[import] wrote", writtenTo, `(${clean.length} chars)`);
+    return sendJSON(res, 200, { ok: true, path: writtenTo });
   } catch (err) {
     console.log("[import] exception:", err.message);
     return sendJSON(res, 400, { error: "import failed: " + err.message });
@@ -431,13 +459,17 @@ async function handleUpdate(req, res) {
   // sessions in the same folder into one tile. Each tabId is unique per
   // Claude session, so we trust it.
 
+  // Preserve the first-seen timestamp so the "started at" display stays
+  // stable. Only new sessions get a fresh ts; subsequent hook events just
+  // update the live fields.
   sessions.set(tabId, {
-    title: title || "Claude session",
+    ...(prev || {}),
+    title: title || (prev && prev.title) || "Claude session",
     state,
-    url: url || null,
-    source: source || "cli",
+    url: url || (prev && prev.url) || null,
+    source: source || (prev && prev.source) || "cli",
     detail: detail || null,
-    ts: ts || Date.now(),
+    ts: (prev && prev.ts) || ts || Date.now(),
     lastSeen: Date.now(),
   });
 
@@ -552,8 +584,10 @@ function resolveSessionId(tabId) {
   return null;
 }
 
-// Parse the session JSONL to extract numeric usage stats only.
-// Intentionally does NOT capture message text (privacy + CORS exfil hardening).
+// Parse the session JSONL to extract usage stats and the most recent
+// user/assistant message snippets. Message text is capped at 500 chars.
+// This is safe to expose because the server binds to 127.0.0.1 only and
+// CORS is restricted to http://localhost:3737.
 function getSessionStats(jsonlPath) {
   const stats = {
     model: null,
@@ -564,6 +598,8 @@ function getSessionStats(jsonlPath) {
     toolCalls: 0,
     totalInputTokens: 0,
     totalOutputTokens: 0,
+    lastUserMessage: null,
+    lastAssistantMessage: null,
   };
   return new Promise((resolve) => {
     const rl = readline.createInterface({
@@ -574,13 +610,23 @@ function getSessionStats(jsonlPath) {
         const d = JSON.parse(line);
         if (d.type === "user") {
           stats.userMessages++;
+          const content = (d.message || {}).content;
+          if (typeof content === "string" && content.trim()) {
+            stats.lastUserMessage = content.slice(0, 500);
+          } else if (Array.isArray(content)) {
+            for (const c of content) {
+              if (c && c.type === "text" && c.text && c.text.trim()) {
+                stats.lastUserMessage = c.text.slice(0, 500);
+                break;
+              }
+            }
+          }
         } else if (d.type === "assistant") {
           stats.assistantMessages++;
           const m = d.message || {};
           if (m.model) stats.model = m.model;
           if (m.usage) {
             const u = m.usage;
-            // cache_read_input_tokens is the best proxy for how full the context is
             const contextTokens =
               (u.cache_read_input_tokens || 0) +
               (u.cache_creation_input_tokens || 0) +
@@ -594,6 +640,9 @@ function getSessionStats(jsonlPath) {
           }
           for (const c of m.content || []) {
             if (c && c.type === "tool_use") stats.toolCalls++;
+            if (c && c.type === "text" && c.text && c.text.trim()) {
+              stats.lastAssistantMessage = c.text.slice(0, 500);
+            }
           }
         }
       } catch {}
@@ -711,4 +760,6 @@ setInterval(scanCliSessions, 15000);
 server.listen(PORT, HOST, () => {
   console.log(`claude_cli_alert running at http://${HOST}:${PORT}`);
   console.log(`Scanning ${CLAUDE_SESSIONS_DIR} every 15s for CLI sessions.`);
+  console.log(`Buddy dir: ${BUDDY_DIR}`);
+  console.log(`Config:    ${CONFIG_PATH}`);
 });
