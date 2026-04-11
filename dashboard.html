@@ -432,12 +432,27 @@
     padding: 20px;
   }
   .tiles-box h2 {
-    margin: 0 0 16px 0;
+    margin: 0 0 4px 0;
     color: var(--teal);
     font-size: 13px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.08em;
+  }
+  .tiles-hint {
+    font-size: 11px;
+    color: var(--gray);
+    margin: 0 0 14px 0;
+    line-height: 1.5;
+  }
+  .tiles-hint code {
+    background: var(--gray-soft);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    color: var(--teal);
+    font-weight: 600;
   }
 
   /* ---------------- session tiles (flippable) ---------------- */
@@ -829,6 +844,7 @@
   <main>
     <section class="tiles-box">
       <h2>Sessions</h2>
+      <p class="tiles-hint">Name a session by running <code>/rename</code> in your Claude Code terminal, or click any title here to rename it in the dashboard.</p>
       <div class="tiles" id="tiles">
         <div class="empty">
           <div class="big">No active sessions yet</div>
@@ -1060,8 +1076,7 @@
                 </div>
               </div>
               <div class="title-row">
-                <span class="title" data-id="${tabId}" title="Click to rename">${title}</span>
-                <span class="edit-icon" data-id="${tabId}" title="Rename">✎</span>
+                <span class="title" data-id="${tabId}" title="Click to rename (or use /rename in Claude Code)">${title}</span>
               </div>
               <div class="detail">${detail || "&nbsp;"}</div>
               <div class="url" title="${url}">${projectLabel}</div>
@@ -1115,14 +1130,6 @@
       el.addEventListener("click", (e) => {
         e.stopPropagation();
         startRenaming(el);
-      });
-    });
-    tiles.querySelectorAll(".edit-icon").forEach(el => {
-      el.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const id = el.getAttribute("data-id");
-        const titleEl = tiles.querySelector(`.title[data-id="${id}"]`);
-        if (titleEl) startRenaming(titleEl);
       });
     });
   }
