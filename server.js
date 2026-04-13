@@ -1147,6 +1147,25 @@ const server = http.createServer(async (req, res) => {
       return sendText(res, 404, "icon missing");
     }
   }
+  // PWA manifest and service worker
+  if (req.method === "GET" && url === "/manifest.json") {
+    try {
+      const buf = fs.readFileSync(path.join(ROOT, "manifest.json"));
+      sendText(res, 200, buf.toString("utf8"), "application/manifest+json; charset=utf-8");
+      return;
+    } catch {
+      return sendText(res, 404, "manifest missing");
+    }
+  }
+  if (req.method === "GET" && url === "/sw.js") {
+    try {
+      const buf = fs.readFileSync(path.join(ROOT, "sw.js"));
+      sendText(res, 200, buf.toString("utf8"), "application/javascript; charset=utf-8");
+      return;
+    } catch {
+      return sendText(res, 404, "sw missing");
+    }
+  }
   // Test endpoint: trigger the alert sound on demand
   if (req.method === "POST" && url === "/test-alert") {
     playAlert();

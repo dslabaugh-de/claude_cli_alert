@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <title>Claude Code Alert</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="manifest" href="/manifest.json" />
 <style>
   /* ---------------------------------------------------------------
      Local font for the buddy card / face — JetBrains Mono has strict
@@ -1504,6 +1505,11 @@
   setInterval(fetchStatus, 2000);
   setInterval(fetchStats, 5000);
   setInterval(fetchBuddy, 30000);
+</script>
+<script>
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }
 </script>
 </body>
 </html>

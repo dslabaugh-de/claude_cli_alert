@@ -1,0 +1,16 @@
+{
+  "name": "Claude Code Alert",
+  "short_name": "Claude Alert",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#222929",
+  "theme_color": "#00807B",
+  "icons": [
+    {
+      "src": "/icon/claude",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
